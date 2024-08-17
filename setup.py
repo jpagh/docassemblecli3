@@ -8,7 +8,7 @@ setup(
     version="0.0.1",
     author="Jack Adamson",
     author_email="jackadamson@gmail.com",
-    description="CLI utilities for using Docassemble requring Python 3",
+    description="Multi-platform CLI utilities for using Docassemble",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/jpagh/docassemblecli3",

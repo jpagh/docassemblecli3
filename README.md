@@ -4,18 +4,27 @@
 [docassemble] servers. This package is meant to be installed on your local
 machine, not on a [docassemble] server.
 
-This version significantly improves functionality on Windows, but requires
-Python 3. It also changes the command structure and usage of the features
-compared to [docassemblecli]. Please read this documentation or utilize the
-`--help` or `-h` options in the terminal.
-
 This project is based on [docassemblecli] by Jonathan Pyle Copyright (c) 2021
 released under the MIT License.
 
+## Differences from [docassemblecli]
+
+- Requires Python 3.
+- Adds multi-platform file monitoring, a.k.a. `dawatchinstall` works on Windows
+  and without requiring fswatch.
+- Adds queueing and batching to improve file monitoring and installation
+  (improves multi-file saving, late file metadata changes, and avoids server
+  restart induced timeouts).
+- Improves invocation, requiring less configuration of PATH and scripts to work,
+  especially in Windows.
+- Improved command structure and option flags (so please read this documentation
+  or utilize the `--help` or `-h` options in the terminal).
+
 ## Prerequisites
 
-This program requires that you have Python 3.8 or higher installed
-on your computer.
+This program should only require that you have Python 3.8 installed on your
+computer, but it was developed and tested with Python 3.12. Please report any
+bugs or errors you experience.
 
 ## Installation
 
