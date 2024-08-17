@@ -16,7 +16,7 @@ released under the MIT License.
   (improves multi-file saving, late file metadata changes, and avoids server
   restart induced timeouts).
 - Improves invocation, requiring less configuration of PATH and scripts to work,
-  especially in Windows.
+  especially in Windows (and does not conflict with [docassemblecli]).
 - Improved command structure and option flags (so please read this documentation
   or utilize the `--help` or `-h` options in the terminal).
 
