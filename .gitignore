@@ -1,0 +1,9 @@
+*~
+.#*
+*.pyc
+build
+*.egg-info
+dist
+newversion.sh
+.history
+__pycache__
