@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "docassemblecli3"
-version = "0.0.1"
+version = "0.0.1-1"
 description = "Multi-platform CLI utilities for using Docassemble"
 authors = ["Jack Adamson <jackadamson@gmail.com>"]
 license = "MIT"
@@ -18,3 +18,7 @@ watchdog = "^4.0.2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+docassemblecli3 = "docassemblecli3:cli"
+da = "docassemblecli3:cli"
