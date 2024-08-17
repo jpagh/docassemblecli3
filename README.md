@@ -192,7 +192,7 @@ package has no module files and all of its dependencies (if any) are installed.
 By default, `da install` installs a package on the server. If you want to install
 a package into your Playground, you can use the `--playground` option.
 
-    dainstall --playground --directory docassemble-foobar
+    da install --playground --directory docassemble-foobar
 
 If you want to install into a particular project in your Playground, indicate
 the project after the `--playground` option, for example project "testing".
