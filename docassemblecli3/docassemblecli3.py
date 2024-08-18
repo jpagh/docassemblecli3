@@ -40,7 +40,7 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 @click.option("--color/--no-color", "-C/-N", default=None, show_default=True, help="Overrides color auto-detection in interactive terminals.")
 def cli(color):
     """
-    Commands for interacting with docassemble servers.
+    Commands for working with docassemble packages and servers.
     """
     CONTEXT_SETTINGS["color"] = color
 

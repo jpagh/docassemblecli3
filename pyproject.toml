@@ -1,25 +1,34 @@
-[tool.poetry]
-name = "docassemblecli3"
-version = "0.0.1"
-description = "Multi-platform CLI utility for working with docassemble packages and servers"
-authors = ["Jack Adamson <jackadamson@gmail.com>"]
-license = "MIT"
-readme = "README.md"
-homepage = "https://github.com/jpagh/docassemblecli3/"
-
-[tool.poetry.dependencies]
-python = "^3.12"
-click = "^8.1.7"
-packaging = "^24.1"
-PyYAML = "^6.0.2"
-requests = "^2.32.3"
-watchdog = "^4.0.2"
-
-
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
 
-[tool.poetry.scripts]
+[project]
+name = "docassemblecli3"
+authors = [
+    {name = "Jack Adamson", email = "jackadamson@gmail.com"},
+    {name = "Jonathan Pyle", email = "jhpyle@gmail.com"},
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+]
+dynamic = ["version", "description"]
+requires-python = ">= 3.8"
+keywords = ["docassemble"]
+dependencies = [
+    "click",
+    "packaging",
+    "PyYAML",
+    "requests",
+    "watchdog"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/jpagh/docassemblecli3"
+"Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
+
+[project.scripts]
 docassemblecli3 = "docassemblecli3:cli"
 da = "docassemblecli3:cli"
