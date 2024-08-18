@@ -37,6 +37,7 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
+@click.version_option()
 @click.option("--color/--no-color", "-C/-N", default=None, show_default=True, help="Overrides color auto-detection in interactive terminals.")
 def cli(color):
     """
@@ -144,7 +145,7 @@ def display_servers(env: list = None) -> list[str]:
     return servers
 
 
-def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = None) -> dict:
+def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "") -> dict:
     if apiurl and apikey:
         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
     if isinstance(env, list):
@@ -153,7 +154,7 @@ def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey:
                 raise click.BadParameter("Cannot be used without a config file.", param_hint="--server")
             else:
                 for item in env:
-                    if item.get("name", "") == server:
+                    if item.get("name", None) == server:
                         return item
                 raise click.BadParameter(f"""Server "{server}" was not found.""", param_hint="--server")
         if len(env) > 0:
