@@ -667,6 +667,50 @@ SOFTWARE.
 """
     else:
         licensetext = license + "\n"
+    gitignore = """\
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.dmypy.json
+dmypy.json
+*.egg-info/
+.installed.cfg
+*.egg
+.vscode
+*~
+.#*
+en
+*/auto
+.history/
+.idea
+.dir-locals.el
+.flake8
+*.swp
+.DS_Store
+.envrc
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+"""
     readme = "# docassemble." + pkgname + "\n\n" + description + "\n\n## Author\n\n" + developer_name + ", " + developer_email + "\n"
     manifestin = """\
 include README.md
@@ -751,6 +795,8 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
         os.makedirs(staticdir, exist_ok=True)
     if not os.path.isdir(sourcesdir):
         os.makedirs(sourcesdir, exist_ok=True)
+    with open(os.path.join(packagedir, '.gitignore'), 'w', encoding='utf-8') as the_file:
+        the_file.write(gitignore)
     with open(os.path.join(packagedir, "README.md"), "w", encoding="utf-8") as the_file:
         the_file.write(readme)
     with open(os.path.join(packagedir, "LICENSE"), "w", encoding="utf-8") as the_file:
