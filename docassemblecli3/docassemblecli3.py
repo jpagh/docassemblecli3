@@ -249,13 +249,6 @@ def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: st
 
 def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
     click.secho("Waiting for package to install...", fg="cyan")
-    if server_version_da == "norestart" or version.parse(server_version_da) >= version.parse("1.5.3"):
-        manually_wait_for_background_processes = False
-    else:
-        manually_wait_for_background_processes = True
-    if DEBUG:
-        click.echo(f"""Server version: {server_version_da}.""")
-        click.echo(f"""Manually wait for background processes: {manually_wait_for_background_processes}""")
     tries = 0
     before_wait_for_server = time.time()
     while tries < 300:
@@ -281,9 +274,10 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
             success = True
     elif info.get("ok", False):
         success = True
-    if DEBUG:
-        click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
-    if manually_wait_for_background_processes:
+    if not (server_version_da == "norestart" or version.parse(server_version_da) >= version.parse("1.5.3")):
+        if DEBUG:
+            click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
+            click.echo("""Manually waiting for background processes.""")
         time.sleep(after_wait_for_server - before_wait_for_server)
     if success:
         return True
@@ -395,6 +389,8 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     if not should_restart:
         server_version_da = "norestart"
         data["restart"] = "0"
+    if DEBUG:
+        click.echo(f"""Server version: {server_version_da}.""")
     if playground:
         if playground != "default":
             data["project"] = playground
