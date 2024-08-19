@@ -28,6 +28,9 @@ LAST_MODIFIED = {
     "restart": False,
 }
 
+global DEBUG
+DEBUG = False
+
 
 # -----------------------------------------------------------------------------
 # click
@@ -39,11 +42,15 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 @click.group(context_settings=CONTEXT_SETTINGS)
 @click.version_option()
 @click.option("--color/--no-color", "-C/-N", default=None, show_default=True, help="Overrides color auto-detection in interactive terminals.")
-def cli(color):
+@click.option("--debug/--no-debug", default=False, hidden=True)
+def cli(color, debug):
     """
     Commands for working with docassemble packages and servers.
     """
     CONTEXT_SETTINGS["color"] = color
+    if debug:
+        global DEBUG
+        DEBUG = True
 
 
 @cli.group(context_settings=CONTEXT_SETTINGS)
@@ -240,8 +247,15 @@ def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: st
         return select_server(cfg=cfg, env=env, server=server)
 
 
-def wait_for_server(playground:bool, task_id, apikey, apiurl):
+def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
     click.secho("Waiting for package to install...", fg="cyan")
+    if version.parse(server_version_da) >= version.parse("1.5.3"):
+        manually_wait_for_background_processes = False
+    else:
+        manually_wait_for_background_processes = True
+    if DEBUG:
+        click.echo(f"""Server version: {server_version_da}.""")
+        click.echo(f"""Manually wait for background processes: {manually_wait_for_background_processes}""")
     tries = 0
     before_wait_for_server = time.time()
     while tries < 300:
@@ -267,8 +281,11 @@ def wait_for_server(playground:bool, task_id, apikey, apiurl):
             success = True
     elif info.get("ok", False):
         success = True
-    click.secho("Waiting for server...", fg="cyan")
-    time.sleep(after_wait_for_server - before_wait_for_server)
+    if DEBUG:
+        click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
+    if manually_wait_for_background_processes:
+        click.secho("Waiting for server...", fg="cyan")
+        time.sleep(after_wait_for_server - before_wait_for_server)
     if success:
         return True
     click.secho("\nUnable to install package.\n", fg="red")
@@ -367,6 +384,16 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     data = {}
     if should_restart:
         click.secho("Server will restart.", fg="yellow")
+        try:
+            server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
+            installed_packages = server_packages.json()
+            server_version_da = "0"
+            for package in installed_packages:
+                if package.get("name", "") == "docassemble":
+                    server_version_da = package.get("version", "0")
+        except Exception as err:
+            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+            raise click.ClickException(f"""{err}\n""")
     if not should_restart:
         data["restart"] = "0"
     if playground:
@@ -414,7 +441,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             except Exception:
                 return(r.text)
             task_id = info["task_id"]
-            success = wait_for_server(bool(playground), task_id, apikey, apiurl)
+            success = wait_for_server(playground=bool(playground), task_id=task_id, apikey=apikey, apiurl=apiurl, server_version_da=server_version_da)
         elif r.status_code == 204:
             success = True
         else:
@@ -435,7 +462,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             return("package POST returned " + str(r.status_code) + ": " + r.text)
         info = r.json()
         task_id = info["task_id"]
-        if wait_for_server(bool(playground), task_id, apikey, apiurl):
+        if wait_for_server(playground=bool(playground), task_id=task_id, apikey=apikey, apiurl=apiurl, server_version_da=server_version_da):
             click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
         if not should_restart:
             try:
@@ -807,5 +834,29 @@ def new(config):
     if click.confirm("Do you want to add a server to this new config file?", default=True):
         apiurl, apikey = prompt_for_api()
         add_server_to_env(cfg=config.name, env=env, apiurl=apiurl, apikey=apikey)
+
+
+@config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
+@common_params_for_config
+@common_params_for_api
+def server_version(config, api, server):
+    selected_server = select_server(*config, *api, server)
+    r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]})
+    if DEBUG:
+        click.echo(r.status_code)
+    installed_packages = r.json()
+    for package in installed_packages:
+        if package.get("name", "") == "docassemble":
+            click.echo(package["version"])
+
+
+@config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
+@common_params_for_config
+@common_params_for_api
+def test_auth(config, api, server):
+    selected_server = select_server(*config, *api, server)
+    apiurl = selected_server["apiurl"]
+    apikey = selected_server["apikey"]
+    test_apiurl_apikey(apiurl=apiurl, apikey=apikey)
 
 

@@ -7,3 +7,4 @@ dist
 newversion.sh
 .history
 __pycache__
+.venv/
