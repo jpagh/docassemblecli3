@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import click
 import requests
 import yaml
-from packaging import version
+from packaging import version as packaging_version
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -257,7 +257,7 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
         else:
             full_url = apiurl + "/api/package_update_status"
         try:
-            r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey})
+            r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
         except requests.exceptions.RequestException:
             pass
         if r.status_code != 200:
@@ -274,7 +274,7 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
             success = True
     elif info.get("ok", False):
         success = True
-    if not (server_version_da == "norestart" or version.parse(server_version_da) >= version.parse("1.5.3")):
+    if not (server_version_da == "norestart" or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")):
         if DEBUG:
             click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
             click.echo("""Manually waiting for background processes.""")
@@ -297,7 +297,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     archive = tempfile.NamedTemporaryFile(suffix=".zip")
     zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w")
     try:
-        ignore_process = subprocess.run(["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=directory)
+        ignore_process = subprocess.run(["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=directory, check=False)
         ignore_process.check_returncode()
         raw_ignore = ignore_process.stdout.splitlines()
     except Exception:
@@ -330,7 +330,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                                 else:
                                     dependencies[package_name] = {"installed": False, "operator": None, "version": None}
         for the_file in files:
-            if the_file.endswith("~") or the_file.endswith(".pyc") or the_file.startswith("#") or the_file.startswith(".#") or (the_file == ".gitignore" and root_directory == root) or os.path.join(adjusted_root, the_file) in to_ignore:
+            if the_file.endswith("~") or the_file.endswith(".pyc") or the_file.endswith(".swp") or the_file.startswith("#") or the_file.startswith(".#") or (the_file == ".gitignore" and root_directory == root) or os.path.join(adjusted_root, the_file) in to_ignore:
                 continue
             if not has_python_files and the_file.endswith(".py") and not (the_file == "setup.py" and root == root_directory) and the_file != "__init__.py":
                 has_python_files = True
@@ -343,7 +343,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         should_restart = True
     elif len(dependencies) > 0 or this_package_name:
         try:
-            r = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
+            r = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -358,15 +358,15 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                     condition = True
                     if dependency_info["operator"]:
                         if dependency_info["operator"] == "==":
-                            condition = version.parse(package_info["version"]) == version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(dependency_info["version"])
                         elif dependency_info["operator"] == "<=":
-                            condition = version.parse(package_info["version"]) <= version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(dependency_info["version"])
                         elif dependency_info["operator"] == ">=":
-                            condition = version.parse(package_info["version"]) >= version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(dependency_info["version"])
                         elif dependency_info["operator"] == "<":
-                            condition = version.parse(package_info["version"]) < version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(dependency_info["version"])
                         elif dependency_info["operator"] == ">":
-                            condition = version.parse(package_info["version"]) > version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(dependency_info["version"])
                     if condition:
                         dependency_info["installed"] = True
             if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
@@ -406,7 +406,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.echo("\n")
             return("playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text)
         try:
-            r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey})
+            r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey}, timeout=600)
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -418,7 +418,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             if "project" not in data or error_message != "Invalid project.":
                 return("playground_install POST returned " + str(r.status_code) + ": " + r.text)
             try:
-                r = requests.post(apiurl + "/api/playground/project", data={"project": data["project"]}, headers={"X-API-Key": apikey})
+                r = requests.post(apiurl + "/api/playground/project", data={"project": data["project"]}, headers={"X-API-Key": apikey}, timeout=600)
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
@@ -426,7 +426,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 return("needed to create playground project but POST to api/playground/project returned " + str(r.status_code) + ": " + r.text)
             archive.seek(0)
             try:
-                r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey})
+                r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey}, timeout=600)
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
@@ -449,7 +449,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             return 1
     else:
         try:
-            r = requests.post(apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey})
+            r = requests.post(apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey}, timeout=600)
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -461,7 +461,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
         if not should_restart:
             try:
-                r = requests.post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey})
+                r = requests.post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
@@ -887,7 +887,7 @@ def new(config):
 @common_params_for_api
 def server_version(config, api, server):
     selected_server = select_server(*config, *api, server)
-    r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]})
+    r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600)
     if DEBUG:
         click.echo(r.status_code)
     installed_packages = r.json()
