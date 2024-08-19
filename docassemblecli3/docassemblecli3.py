@@ -249,7 +249,7 @@ def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: st
 
 def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
     click.secho("Waiting for package to install...", fg="cyan")
-    if version.parse(server_version_da) >= version.parse("1.5.3"):
+    if server_version_da == "norestart" or version.parse(server_version_da) >= version.parse("1.5.3"):
         manually_wait_for_background_processes = False
     else:
         manually_wait_for_background_processes = True
@@ -284,7 +284,6 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
     if DEBUG:
         click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
     if manually_wait_for_background_processes:
-        click.secho("Waiting for server...", fg="cyan")
         time.sleep(after_wait_for_server - before_wait_for_server)
     if success:
         return True
@@ -387,7 +386,6 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         try:
             server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
             installed_packages = server_packages.json()
-            server_version_da = "0"
             for package in installed_packages:
                 if package.get("name", "") == "docassemble":
                     server_version_da = package.get("version", "0")
@@ -395,6 +393,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
     if not should_restart:
+        server_version_da = "norestart"
         data["restart"] = "0"
     if playground:
         if playground != "default":
@@ -489,6 +488,11 @@ def install(directory, config, api, server, playground, restart):
     `install` tries to get API info from the --api option first (if used), then from the first server listed in the ~/.docassemblecli file if it exists (unless the --config option is used), then it tries to use environmental variables, and finally it prompts the user directly.
     """
     selected_server = select_server(*config, *api, server)
+    click.echo(f"""Server: {selected_server["name"]}""")
+    if not playground:
+        click.echo("Location: Package")
+    else:
+        click.echo(f"""Location: Playground "{playground}" """)
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
     package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
     return 0
