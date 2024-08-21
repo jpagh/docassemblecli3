@@ -376,16 +376,21 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         should_restart = True
     data = {}
     if should_restart:
-        click.secho("Server will restart.", fg="yellow")
         try:
             server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
-            installed_packages = server_packages.json()
-            for package in installed_packages:
-                if package.get("name", "") == "docassemble":
-                    server_version_da = package.get("version", "0")
+            if server_packages.status_code != 200:
+                if server_packages.status_code == 403:
+                    click.secho("""\nThe API KEY is invalid.""", fg="red")
+                server_packages.raise_for_status()
+            else:
+                installed_packages = server_packages.json()
+                for package in installed_packages:
+                    if package.get("name", "") == "docassemble":
+                        server_version_da = package.get("version", "0")
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
+        click.secho("Server will restart.", fg="yellow")
     if not should_restart:
         server_version_da = "norestart"
         data["restart"] = "0"
@@ -887,13 +892,21 @@ def new(config):
 @common_params_for_api
 def server_version(config, api, server):
     selected_server = select_server(*config, *api, server)
-    r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600)
-    if DEBUG:
-        click.echo(r.status_code)
-    installed_packages = r.json()
-    for package in installed_packages:
-        if package.get("name", "") == "docassemble":
-            click.echo(package["version"])
+    try:
+        r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600)
+        if DEBUG:
+            click.echo(type(r.status_code))
+        if r.status_code != 200:
+            if r.status_code == 403:
+                click.secho("""\nThe API KEY is invalid.""", fg="red")
+            r.raise_for_status()
+        installed_packages = r.json()
+        for package in installed_packages:
+            if package.get("name", "") == "docassemble":
+                click.echo(package["version"])
+    except Exception as err:
+        click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+        raise click.ClickException(f"""{err}\n""")
 
 
 @config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
