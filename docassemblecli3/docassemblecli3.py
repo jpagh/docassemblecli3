@@ -550,7 +550,7 @@ def install(directory, config, api, server, playground, restart):
 # watchdog
 # -----------------------------------------------------------------------------
 
-def matches_ignore_patterns(path: str, directory: str) -> bool:
+def matches_ignore_patterns(path: str, directory: str = "") -> bool:
     if directory and os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
         with open(gitignore_path) as file:
             gm = gitmatch.compile(file)
