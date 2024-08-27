@@ -558,7 +558,7 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
         gm = gitmatch.compile(GITIGNORE)
     # Convert the absolute path to a relative path for gitmatch to work
     path = os.path.relpath(path, directory)
-    return not gm.match(path=path)
+    return gm.match(path=path)
 
 
 class WatchHandler(FileSystemEventHandler):
