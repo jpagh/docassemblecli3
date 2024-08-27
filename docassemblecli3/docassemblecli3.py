@@ -556,7 +556,7 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
             gm = gitmatch.compile(file)
     else:
         gm = gitmatch.compile(GITIGNORE)
-    return gm.match(path.replace("directory", ""))
+    return gm.match(path.replace(directory, ""))
 
 
 class WatchHandler(FileSystemEventHandler):
