@@ -557,6 +557,7 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
     else:
         gm = gitmatch.compile(GITIGNORE)
     print(directory)
+    directory = directory.replace("\\", "/")
     print(path)
     path = path.replace(directory, "")
     print(path)
