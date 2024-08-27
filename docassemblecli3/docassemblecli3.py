@@ -553,10 +553,10 @@ def install(directory, config, api, server, playground, restart):
 def matches_ignore_patterns(path: str, directory: str) -> bool:
     if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
         with open(gitignore_path) as file:
-            ignore_patterns = file.read()
+            ignore_patterns = [line.strip() for line in file]
     else:
-        ignore_patterns = GITIGNORE
-    ignore_patterns += "\n.git/"
+        ignore_patterns = GITIGNORE.split("\n")
+    ignore_patterns.append(".git/")
     gm = gitmatch.compile(ignore_patterns)
     # Convert the absolute path to a relative path for gitmatch to work
     path = os.path.relpath(path, directory)
