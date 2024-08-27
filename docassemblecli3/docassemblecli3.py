@@ -550,18 +550,20 @@ def install(directory, config, api, server, playground, restart):
 # watchdog
 # -----------------------------------------------------------------------------
 
-def matches_ignore_patterns(path: str, directory: str = "") -> bool:
-    if directory and os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
+def matches_ignore_patterns(path: str, directory: str) -> bool:
+    if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
         with open(gitignore_path) as file:
             gm = gitmatch.compile(file)
     else:
         gm = gitmatch.compile(GITIGNORE)
+    # Convert the absolute path to a relative path for gitmatch to work
+    path = os.path.relpath(path, directory)
     return not gm.match(path=path)
 
 
 class WatchHandler(FileSystemEventHandler):
     def __init__(self, *args, **kwargs):
-        self.directory = kwargs.pop("directory", "")
+        self.directory = kwargs.pop("directory")
         super(WatchHandler, self).__init__(*args, **kwargs)
 
     def on_any_event(self, event):
