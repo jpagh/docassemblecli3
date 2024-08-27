@@ -1,5 +1,5 @@
 import datetime
-import fnmatch
+import gitmatch
 import os
 import re
 import stat
@@ -550,25 +550,18 @@ def install(directory, config, api, server, playground, restart):
 # watchdog
 # -----------------------------------------------------------------------------
 
-def matches_ignore_patterns(string):
-    ignore_patterns = [
-        r"*#*",
-        r"*/~*",
-        r".*~",
-        r"*/.git*",
-        r"*/flycheck_*",
-        r"*/.git/*",
-        r"*__pycache__*",
-    ]
-    for pattern in ignore_patterns:
-        if fnmatch.fnmatch(string, pattern):
-            return True
-    return False
+def matches_ignore_patterns(path: str, directory: str) -> bool:
+    if directory and os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
+        with open(gitignore_path) as file:
+            gm = gitmatch.compile(file)
+    else:
+        gm = gitmatch.compile(GITIGNORE)
+    return gm.match(path)
 
 
 class WatchHandler(FileSystemEventHandler):
     def __init__(self, *args, **kwargs):
-        self.args = kwargs.pop("args", None)
+        self.directory = kwargs.pop("directory", "")
         super(WatchHandler, self).__init__(*args, **kwargs)
 
     def on_any_event(self, event):
@@ -577,7 +570,7 @@ class WatchHandler(FileSystemEventHandler):
             return None
         if event.event_type == "created" or event.event_type == "modified":
             path = event.src_path.replace("\\", "/")
-            if not matches_ignore_patterns(path):
+            if not matches_ignore_patterns(path=path, directory=self.directory):
                 LAST_MODIFIED["time"] = time.time()
                 LAST_MODIFIED["files"][str(event.src_path)] = True
                 if str(event.src_path).endswith(".py"):
@@ -599,7 +592,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
     selected_server = select_server(*config, *api, server)
     restart_param = restart
     global LAST_MODIFIED
-    event_handler = WatchHandler()
+    event_handler = WatchHandler(directory=directory)
     observer = Observer()
     observer.schedule(event_handler, directory, recursive=True)
     observer.start()
