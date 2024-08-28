@@ -252,10 +252,11 @@ works:
     -r, --restart [yes|no|auto]  On package install: yes, force a restart | no,
                                 do not restart | auto, only restart if any .py
                                 files were changed  [default: auto]
-    -b, --buffer SECONDS         Set the buffer (wait time) between a file
-                                change event and package installation. If you
-                                are experiencing multiple installs back-to-
-                                back, try increasing this value.  [default: 3]
+    -b, --buffer SECONDS         (On server restart only) Set the buffer (wait
+                                time) between a file change event and package
+                                installation. If you are experiencing multiple
+                                installs back-to-back, try increasing this
+                                value.  [default: 3]
     -h, --help                   Show this message and exit.
 
 Your package's `.gitignore` file is also used by `watch` to decide which files
