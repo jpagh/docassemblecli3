@@ -588,7 +588,7 @@ class WatchHandler(FileSystemEventHandler):
 @common_params_for_installation
 @common_params_for_api
 @click.option("--restart", "-r", type=click.Choice(["yes", "no", "auto"]), default="auto", show_default=True, help="On package install: yes, force a restart | no, do not restart | auto, only restart if any .py files were changed")
-@click.option("--buffer", "-b", metavar="SECONDS", default=3, show_default=True, help="Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.")
+@click.option("--buffer", "-b", metavar="SECONDS", default=0, show_default=True, help="Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.")
 def watch(directory, config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
