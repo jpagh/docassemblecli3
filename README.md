@@ -261,7 +261,8 @@ works:
 Your package's `.gitignore` file is also used by `watch` to decide which files
 to ignore. If you don't have a `.gitignore` file in your package, then the
 default `.gitignore` that `create` makes is used instead. The `.git/` directory
-is also ignored.
+and `.gitignore` file are both also ignored by `watch` (note: don't add them to
+your `.gitignore`).
 
 #### watchdog
 
