@@ -258,6 +258,11 @@ works:
                                 back, try increasing this value.  [default: 3]
     -h, --help                   Show this message and exit.
 
+Your package's `.gitignore` file is also used by `watch` to decide which files
+to ignore. If you don't have a `.gitignore` file in your package, then the
+default `.gitignore` that `create` makes is used instead. The `.git/` directory
+is also ignored.
+
 #### watchdog
 
 The `watch` command now depends on the
