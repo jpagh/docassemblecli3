@@ -556,7 +556,7 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
             ignore_patterns = [line.strip() for line in file]
     else:
         ignore_patterns = GITIGNORE.split("\n")
-    ignore_patterns.append(".git/")
+    ignore_patterns.extend([".git/", ".gitignore"])
     gm = gitmatch.compile(ignore_patterns)
     # Convert the absolute path to a relative path for gitmatch to work
     path = os.path.relpath(path, directory)
