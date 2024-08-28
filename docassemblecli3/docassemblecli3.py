@@ -588,7 +588,7 @@ class WatchHandler(FileSystemEventHandler):
 @common_params_for_installation
 @common_params_for_api
 @click.option("--restart", "-r", type=click.Choice(["yes", "no", "auto"]), default="auto", show_default=True, help="On package install: yes, force a restart | no, do not restart | auto, only restart if any .py files were changed")
-@click.option("--buffer", "-b", metavar="SECONDS", default=0, show_default=True, help="Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.")
+@click.option("--buffer", "-b", metavar="SECONDS", default=3, show_default=True, help="(On server restart only) Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.")
 def watch(directory, config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
@@ -614,9 +614,9 @@ def watch(directory, config, api, server, playground, restart, buffer):
                 click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
                 if restart_param == "yes" or (restart_param == "auto" and LAST_MODIFIED["restart"]):
                     restart = "yes"
+                    time.sleep(buffer)
                 else:
                     restart = "no"
-                time.sleep(buffer)
                 for item in LAST_MODIFIED["files"].keys():
                     click.echo("  " + item.replace(directory, ""))
                 LAST_MODIFIED["time"] = 0
