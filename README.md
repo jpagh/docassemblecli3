@@ -232,7 +232,7 @@ server.
 To exit `watch`, press **Ctrl + c**.
 
 You can run `da watch --help` to get more information about how `watch`
-works:s
+works:
 
     Usage: da watch [OPTIONS]
 
