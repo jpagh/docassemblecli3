@@ -913,7 +913,7 @@ def server_version(config, api, server):
 @config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @common_params_for_config
 @common_params_for_api
-def test_auth(config, api, server):
+def test(config, api, server):
     selected_server = select_server(*config, *api, server)
     apiurl = selected_server["apiurl"]
     apikey = selected_server["apikey"]
