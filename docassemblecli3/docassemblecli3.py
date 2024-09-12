@@ -45,6 +45,8 @@ dmypy.json
 *.egg
 .vscode
 *~
+~*
+*.~lock.*
 .#*
 en
 */auto
