@@ -575,6 +575,7 @@ class WatchHandler(FileSystemEventHandler):
         if event.is_directory:
             return None
         if event.event_type == "created" or event.event_type == "modified":
+            click.echo(event)
             path = event.src_path.replace("\\", "/")
             if not matches_ignore_patterns(path=path, directory=self.directory):
                 LAST_MODIFIED["time"] = time.time()
