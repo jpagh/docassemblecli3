@@ -649,7 +649,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
                 LAST_MODIFIED["time"] = 0
                 LAST_MODIFIED["files"] = {}
                 LAST_MODIFIED["restart"] = False
-                # package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
+                package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
             time.sleep(1)
     except Exception as e:
         click.echo(f"\nException occurred: {e}")
