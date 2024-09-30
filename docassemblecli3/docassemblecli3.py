@@ -594,24 +594,16 @@ class WatchHandler(FileSystemEventHandler):
         global LAST_MODIFIED, FILE_CHECKSUMS
         if event.is_directory:
             return None
-        path = event.src_path.replace("\\", "/")
-        if event.event_type == "created":
-            if not matches_ignore_patterns(path=path, directory=self.directory):
-                FILE_CHECKSUMS[path] = calculate_md5(path)
-                LAST_MODIFIED["time"] = time.time()
-                LAST_MODIFIED["files"][str(event.src_path)] = True
-                if str(event.src_path).endswith(".py"):
-                    LAST_MODIFIED["restart"] = True
-        elif event.event_type == "modified":
-            if not matches_ignore_patterns(path=path, directory=self.directory):
-                new_checksum = calculate_md5(path)
-                if path not in FILE_CHECKSUMS or FILE_CHECKSUMS[path] != new_checksum:
-                    click.echo(path)
-                    click.echo(event)
-                    FILE_CHECKSUMS[path] = new_checksum
+        ignore_path = event.src_path.replace("\\", "/")
+        if event.event_type == "created" or event.event_type == "modified":
+            click.echo(event.src_path)
+            if not matches_ignore_patterns(path=ignore_path, directory=self.directory):
+                new_checksum = calculate_md5(event.src_path)
+                if event.src_path not in FILE_CHECKSUMS or FILE_CHECKSUMS[event.src_path] != new_checksum:
+                    FILE_CHECKSUMS[event.src_path] = new_checksum
                     LAST_MODIFIED["time"] = time.time()
                     LAST_MODIFIED["files"][str(event.src_path)] = True
-                    if path.endswith(".py"):
+                    if str(event.src_path).endswith(".py"):
                         LAST_MODIFIED["restart"] = True
 
 
