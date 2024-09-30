@@ -596,7 +596,6 @@ class WatchHandler(FileSystemEventHandler):
         if event.is_directory:
             return None
         if event.event_type == "created" or event.event_type == "modified":
-            click.echo(event.src_path)
             if not matches_ignore_patterns(path=event.src_path.replace("\\", "/"), directory=self.directory):
                 new_checksum = calculate_md5(event.src_path)
                 if event.src_path not in FILE_CHECKSUMS or FILE_CHECKSUMS[event.src_path] != new_checksum:
