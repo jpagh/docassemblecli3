@@ -606,6 +606,7 @@ class WatchHandler(FileSystemEventHandler):
             if not matches_ignore_patterns(path=path, directory=self.directory):
                 new_checksum = calculate_md5(path)
                 if path not in FILE_CHECKSUMS or FILE_CHECKSUMS[path] != new_checksum:
+                    click.echo(path)
                     click.echo(event)
                     FILE_CHECKSUMS[path] = new_checksum
                     LAST_MODIFIED["time"] = time.time()
