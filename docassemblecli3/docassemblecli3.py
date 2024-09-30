@@ -624,8 +624,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
                 LAST_MODIFIED["time"] = 0
                 LAST_MODIFIED["files"] = {}
                 LAST_MODIFIED["restart"] = False
-                package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
-                # click.echo(f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Watching... {directory}""")
+                # package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
             time.sleep(1)
     except Exception as e:
         click.echo(f"\nException occurred: {e}")
