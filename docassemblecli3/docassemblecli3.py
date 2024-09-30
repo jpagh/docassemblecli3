@@ -21,7 +21,6 @@ from watchdog.observers import Observer
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
 
-
 global LAST_MODIFIED
 LAST_MODIFIED = {
     "time": 0,
@@ -34,7 +33,6 @@ FILE_CHECKSUMS = {}
 
 global DEBUG
 DEBUG = False
-
 
 global GITIGNORE
 GITIGNORE = """\
