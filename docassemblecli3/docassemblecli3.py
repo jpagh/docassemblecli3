@@ -1,5 +1,5 @@
 import datetime
-import gitmatch
+import hashlib
 import os
 import re
 import stat
@@ -11,6 +11,7 @@ from functools import wraps
 from urllib.parse import urlparse
 
 import click
+import gitmatch
 import requests
 import yaml
 from packaging import version as packaging_version
@@ -27,6 +28,9 @@ LAST_MODIFIED = {
     "files": {},
     "restart": False,
 }
+
+global FILE_CHECKSUMS
+FILE_CHECKSUMS = {}
 
 global DEBUG
 DEBUG = False
@@ -549,8 +553,24 @@ def install(directory, config, api, server, playground, restart):
 
 
 # -----------------------------------------------------------------------------
-# watchdog
+# watchdog & hashlib
 # -----------------------------------------------------------------------------
+def calculate_md5(path: str) -> str:
+    hash_md5 = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+
+def scan_directory(directory):
+    global FILE_CHECKSUMS
+    for root, _, files in os.walk(directory):
+        for file in files:
+            filepath = os.path.join(root, file)
+            if not matches_ignore_patterns(path=filepath, directory=directory):
+                FILE_CHECKSUMS[filepath] = calculate_md5(filepath)
+
 
 def matches_ignore_patterns(path: str, directory: str) -> bool:
     if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
@@ -571,17 +591,26 @@ class WatchHandler(FileSystemEventHandler):
         super(WatchHandler, self).__init__(*args, **kwargs)
 
     def on_any_event(self, event):
-        global LAST_MODIFIED
+        global LAST_MODIFIED, FILE_CHECKSUMS
         if event.is_directory:
             return None
-        if event.event_type == "created" or event.event_type == "modified":
-            click.echo(event)
-            path = event.src_path.replace("\\", "/")
+        path = event.src_path.replace("\\", "/")
+        if event.event_type == "created":
             if not matches_ignore_patterns(path=path, directory=self.directory):
+                FILE_CHECKSUMS[path] = calculate_md5(path)
                 LAST_MODIFIED["time"] = time.time()
                 LAST_MODIFIED["files"][str(event.src_path)] = True
                 if str(event.src_path).endswith(".py"):
                     LAST_MODIFIED["restart"] = True
+        elif event.event_type == "modified":
+            if not matches_ignore_patterns(path=path, directory=self.directory):
+                new_checksum = calculate_md5(path)
+                if path not in FILE_CHECKSUMS or FILE_CHECKSUMS[path] != new_checksum:
+                    FILE_CHECKSUMS[path] = new_checksum
+                    LAST_MODIFIED["time"] = time.time()
+                    LAST_MODIFIED["files"][str(event.src_path)] = True
+                    if path.endswith(".py"):
+                        LAST_MODIFIED["restart"] = True
 
 
 # =============================================================================
@@ -598,6 +627,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
     """
     selected_server = select_server(*config, *api, server)
     restart_param = restart
+    scan_directory(directory)
     global LAST_MODIFIED
     event_handler = WatchHandler(directory=directory)
     observer = Observer()
