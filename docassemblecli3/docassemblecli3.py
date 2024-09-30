@@ -344,6 +344,7 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
 # -----------------------------------------------------------------------------
 # package_installer
 # -----------------------------------------------------------------------------
+
 def package_installer(directory, apiurl, apikey, playground, restart):
     archive = tempfile.NamedTemporaryFile(suffix=".zip")
     zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w")
@@ -529,6 +530,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
 # =============================================================================
 # install
 # =============================================================================
+
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_api
 @common_params_for_installation
@@ -553,6 +555,7 @@ def install(directory, config, api, server, playground, restart):
 # -----------------------------------------------------------------------------
 # watchdog & hashlib
 # -----------------------------------------------------------------------------
+
 def calculate_md5(filepath: str) -> str:
     hash_md5 = hashlib.md5()
     with open(filepath, "rb") as f:
@@ -607,6 +610,7 @@ class WatchHandler(FileSystemEventHandler):
 # =============================================================================
 # watch
 # =============================================================================
+
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_installation
 @common_params_for_api
@@ -660,6 +664,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
 # =============================================================================
 # create
 # =============================================================================
+
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--package", metavar="PACKAGE", help="Name of the package you want to create")
 @click.option("--developer-name", metavar="NAME", help="Name of the developer of the package")
@@ -942,5 +947,4 @@ def test(config, api, server):
     apiurl = selected_server["apiurl"]
     apikey = selected_server["apikey"]
     test_apiurl_apikey(apiurl=apiurl, apikey=apikey)
-
 
