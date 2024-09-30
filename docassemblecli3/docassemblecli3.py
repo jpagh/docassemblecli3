@@ -555,9 +555,9 @@ def install(directory, config, api, server, playground, restart):
 # -----------------------------------------------------------------------------
 # watchdog & hashlib
 # -----------------------------------------------------------------------------
-def calculate_md5(path: str) -> str:
+def calculate_md5(filepath: str) -> str:
     hash_md5 = hashlib.md5()
-    with open(path, "rb") as f:
+    with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
@@ -628,6 +628,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
     selected_server = select_server(*config, *api, server)
     restart_param = restart
     scan_directory(directory)
+    click.echo(FILE_CHECKSUMS)
     global LAST_MODIFIED
     event_handler = WatchHandler(directory=directory)
     observer = Observer()
