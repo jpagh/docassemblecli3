@@ -940,12 +940,16 @@ def server_version(config, api, server):
         raise click.ClickException(f"""{err}\n""")
 
 
-@config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
+@config.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_config
 @common_params_for_api
 def test(config, api, server):
+    """
+    Test the URL and API key.
+    """
     selected_server = select_server(*config, *api, server)
     apiurl = selected_server["apiurl"]
     apikey = selected_server["apikey"]
+    click.echo(apiurl)
     test_apiurl_apikey(apiurl=apiurl, apikey=apikey)
 

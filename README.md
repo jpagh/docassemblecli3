@@ -281,9 +281,9 @@ The `watch` command now depends on the
 
 An additional note from [watchdog]'s documentation:
 
-Note that when using watchdog with kqueue (macOS and BSD), you need the number of file
-descriptors allowed to be opened by programs running on your system to be
-increased to more than the number of files that you will be monitoring. The
+Note that when using watchdog with kqueue (macOS and BSD), you need the number
+of file descriptors allowed to be opened by programs running on your system to
+be increased to more than the number of files that you will be monitoring. The
 easiest way to do that is to edit your ~/.profile file and add a line similar
 to:
 
@@ -300,8 +300,8 @@ of files.
 
 ### config
 
-There are four commands for managing your saved servers/your config file, `add`,
-`display`, `new`, and `remove`.
+These commands are for managing your saved servers and config file. They are
+easy to use and will prompt you as necessary.
 
     Usage: da config [OPTIONS] COMMAND [ARGS]...
 
@@ -315,9 +315,7 @@ There are four commands for managing your saved servers/your config file, `add`,
     display  List the servers in the config file.
     new      Create a new config file.
     remove   Remove a server from the config file.
-
-They are all really easy to use and will prompt you for all necessary
-information.
+    test     Test the URL and API key.
 
 ## How it works
 
