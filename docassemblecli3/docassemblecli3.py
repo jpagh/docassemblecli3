@@ -558,9 +558,12 @@ def install(directory, config, api, server, playground, restart):
 
 def calculate_md5(filepath: str) -> str:
     hash_md5 = hashlib.md5()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+    except FileNotFoundError:
+        return ""
     return hash_md5.hexdigest()
 
 
@@ -598,7 +601,7 @@ class WatchHandler(FileSystemEventHandler):
         if event.event_type == "created" or event.event_type == "modified":
             if not matches_ignore_patterns(path=event.src_path.replace("\\", "/"), directory=self.directory):
                 new_checksum = calculate_md5(event.src_path)
-                if event.src_path not in FILE_CHECKSUMS or FILE_CHECKSUMS[event.src_path] != new_checksum:
+                if event.src_path not in FILE_CHECKSUMS or (new_checksum and FILE_CHECKSUMS[event.src_path] != new_checksum):
                     FILE_CHECKSUMS[event.src_path] = new_checksum
                     LAST_MODIFIED["time"] = time.time()
                     LAST_MODIFIED["files"][str(event.src_path)] = True
