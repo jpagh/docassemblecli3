@@ -4,6 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "docassemblecli3"
+version = "0.2.2"
 authors = [
     {name = "Jack Adamson", email = "jackadamson@gmail.com"},
     {name = "Jonathan Pyle", email = "jhpyle@gmail.com"},
@@ -14,7 +15,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
 ]
-dynamic = ["version", "description"]
+dynamic = ["description"]
 requires-python = ">= 3.8"
 keywords = ["docassemble"]
 dependencies = [
@@ -33,3 +34,6 @@ dependencies = [
 [project.scripts]
 docassemblecli3 = "docassemblecli3:cli"
 da = "docassemblecli3:cli"
+
+[tool.ruff]
+line-length = 120
