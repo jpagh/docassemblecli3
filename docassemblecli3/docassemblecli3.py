@@ -437,7 +437,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             else:
                 installed_packages = server_packages.json()
                 for package in installed_packages:
-                    if package.get("name", "") == "docassemble":
+                    if package.get("name", "") == "docassemble.base":
                         server_version_da = package.get("version", "0")
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
@@ -927,13 +927,14 @@ def server_version(config, api, server):
         r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600)
         if DEBUG:
             click.echo(type(r.status_code))
+            click.echo(r.status_code)
         if r.status_code != 200:
             if r.status_code == 403:
                 click.secho("""\nThe API KEY is invalid.""", fg="red")
             r.raise_for_status()
         installed_packages = r.json()
         for package in installed_packages:
-            if package.get("name", "") == "docassemble":
+            if package.get("name", "") == "docassemble.base":
                 click.echo(package["version"])
     except Exception as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
