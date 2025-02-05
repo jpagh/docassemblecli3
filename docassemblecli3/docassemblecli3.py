@@ -34,6 +34,9 @@ FILE_CHECKSUMS = {}
 global DEBUG
 DEBUG = False
 
+global EXCLUDED_DIRECTORIES
+EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
+
 global GITMATCH_COMPILED
 GITMATCH_COMPILED = None
 
@@ -437,7 +440,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         dirs[:] = [
             d
             for d in dirs
-            if d not in [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
+            if d not in EXCLUDED_DIRECTORIES
             and not d.endswith(".egg-info")
             and os.path.join(adjusted_root, d) not in to_ignore
         ]
@@ -740,7 +743,7 @@ def scan_directory(directory):
     click.secho("Scanning files...", fg="cyan")
     global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
-        excluded_directories = [".git", ".venv"]
+        excluded_directories = EXCLUDED_DIRECTORIES
         subdirectories[:] = [d for d in subdirectories if d not in excluded_directories]
         for file in files:
             filepath = os.path.join(current_directory, file)
