@@ -737,6 +737,7 @@ def calculate_md5(filepath: str) -> str:
 
 
 def scan_directory(directory):
+    click.secho("Scanning files...", fg="cyan")
     global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
         excluded_directories = [".git", ".venv"]
