@@ -153,7 +153,7 @@ works:
                                 directory]
     -c, --config PATH            Specify the config file to use or leave it
                                 blank to skip using any config file  [default:
-                                C:\Users\jacka\.docassemblecli]
+                                C:\Users\current_user\.docassemblecli]
     -p, --playground (PROJECT)   Install into the default Playground or into the
                                 specified Playground project.
     -r, --restart [yes|no|auto]  On package install: yes, force a restart | no,
@@ -243,7 +243,7 @@ works:
                                 directory]
     -c, --config PATH            Specify the config file to use or leave it
                                 blank to skip using any config file  [default:
-                                C:\Users\jacka\.docassemblecli]
+                                C:\Users\current_user\.docassemblecli]
     -p, --playground (PROJECT)   Install into the default Playground or into the
                                 specified Playground project.
     -a, --api <URL TEXT>...      URL of the docassemble server and API key of
@@ -263,11 +263,18 @@ Your package's `.gitignore` file is also used by `watch` to decide which files
 to ignore. If you don't have a `.gitignore` file in your package, then the
 default `.gitignore` that `create` makes is used instead. The `.git/` directory
 and `.gitignore` file are both also ignored by `watch` (note: don't add them to
-your `.gitignore`).
+your `.gitignore`). The following directories are always ignored by `watch`: 
+`.git`, `__pycache__`, `.mypy_cache`, `.venv`, `.history`, `build`.
+
+If you manually add a `path` key to a server in your `.docassemblecli` config
+file, it will cause that server to be used if no `server` is provided and the
+`path` matches the `directory` that `watch` was given
+[default: current directory]. Additionally, if you manually add a `playground`
+key to that server, it will be used when using `watch`.
 
 #### watchdog
 
-The `watch` command now depends on the
+The `watch` command depends on the
 [watchdog](https://pypi.org/project/watchdog/) Python package. This allows
 `watch` to work on the following platforms that [watchdog] supports:
 
