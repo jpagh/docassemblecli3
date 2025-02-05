@@ -260,7 +260,7 @@ def display_servers(env: list = None) -> list[str]:
     return servers
 
 
-def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "") -> dict:
+def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "", **kwargs) -> dict:
     if apiurl and apikey:
         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
     if isinstance(env, list):
@@ -273,6 +273,10 @@ def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey:
                         return item
                 raise click.BadParameter(f"""Server "{server}" was not found.""", param_hint="--server")
         if len(env) > 0:
+            if "watch" in kwargs:
+                for item in env:
+                    if item.get("path", None) == kwargs["watch"]:
+                        return item
             return env[0]
     if "DOCASSEMBLEAPIURL" in os.environ and "DOCASSEMBLEAPIKEY" in os.environ:
         apiurl: str = os.environ["DOCASSEMBLEAPIURL"]
@@ -356,11 +360,11 @@ def add_server_to_env(cfg: str = None, env: list = None, apiurl: str = None, api
     return env
 
 
-def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = None) -> dict:
-    if apiurl and apikey:
-        return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
-    else:
-        return select_server(cfg=cfg, env=env, server=server)
+# def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = None) -> dict:
+#     if apiurl and apikey:
+#         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
+#     else:
+#         return select_server(cfg=cfg, env=env, server=server)
 
 
 def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
@@ -740,7 +744,8 @@ def calculate_md5(filepath: str) -> str:
 
 
 def scan_directory(directory):
-    click.secho("Scanning files...", fg="cyan")
+    if DEBUG:
+        click.secho("Scanning files...", fg="cyan")
     global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
         excluded_directories = EXCLUDED_DIRECTORIES
@@ -749,6 +754,8 @@ def scan_directory(directory):
             filepath = os.path.join(current_directory, file)
             if not matches_ignore_patterns(path=filepath, directory=directory):
                 FILE_CHECKSUMS[filepath] = calculate_md5(filepath)
+    if DEBUG:
+        click.secho("Scanning complete.", fg="green")
 
 
 def matches_ignore_patterns(path: str, directory: str) -> bool:
@@ -818,7 +825,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
     """
-    selected_server = select_server(*config, *api, server)
+    selected_server = select_server(*config, *api, server, watch=directory)
     restart_param = restart
     scan_directory(directory)
     global LAST_MODIFIED
@@ -828,10 +835,14 @@ def watch(directory, config, api, server, playground, restart, buffer):
     observer.start()
     click.echo()
     click.echo(f"""Server: {selected_server["name"]}""")
+
+    if "path" in selected_server and selected_server["path"] == directory:
+        playground = selected_server.get("playground", playground)
     if not playground:
         click.echo("Location: Package")
     else:
         click.echo(f"""Location: Playground "{playground}" """)
+
     click.echo(f"""Watching: {directory}""")
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
     try:
