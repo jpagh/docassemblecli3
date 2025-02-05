@@ -95,7 +95,13 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 
 @click.group(context_settings=CONTEXT_SETTINGS)
 @click.version_option()
-@click.option("--color/--no-color", "-C/-N", default=None, show_default=True, help="Overrides color auto-detection in interactive terminals.")
+@click.option(
+    "--color/--no-color",
+    "-C/-N",
+    default=None,
+    show_default=True,
+    help="Overrides color auto-detection in interactive terminals.",
+)
 @click.option("--debug/--no-debug", default=False, hidden=True)
 def cli(color, debug):
     """
@@ -116,34 +122,76 @@ def config():
 
 
 def common_params_for_api(func):
-    @click.option("--api", "-a", type=(APIURLType(), str), default=(None, None), help="URL of the docassemble server and API key of the user (admin or developer)")
+    @click.option(
+        "--api",
+        "-a",
+        type=(APIURLType(), str),
+        default=(None, None),
+        help="URL of the docassemble server and API key of the user (admin or developer)",
+    )
     @click.option("--server", "-s", metavar="SERVER", default="", help="Specify a server from the config file")
     @wraps(func)
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
+
     return wrapper
 
 
 def common_params_for_config(func):
-    @click.option("--config", "-c", default=DEFAULT_CONFIG, type=click.Path(), callback=validate_and_load_or_create_config, show_default=True, help="Specify the config file to use")
+    @click.option(
+        "--config",
+        "-c",
+        default=DEFAULT_CONFIG,
+        type=click.Path(),
+        callback=validate_and_load_or_create_config,
+        show_default=True,
+        help="Specify the config file to use",
+    )
     @wraps(func)
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
+
     return wrapper
 
 
 def common_params_for_installation(func):
-    @click.option("--directory", "-d", default=os.getcwd(), type=click.Path(), callback=validate_package_directory, help="Specify package directory [default: current directory]")
-    @click.option("--config", "-c", is_flag=False, flag_value="", default=DEFAULT_CONFIG, type=click.Path(), callback=validate_and_load_or_create_config, show_default=True, help="Specify the config file to use or leave it blank to skip using any config file")
-    @click.option("--playground", "-p", metavar="(PROJECT)", is_flag=False, flag_value="default", help="Install into the default Playground or into the specified Playground project.")
+    @click.option(
+        "--directory",
+        "-d",
+        default=os.getcwd(),
+        type=click.Path(),
+        callback=validate_package_directory,
+        help="Specify package directory [default: current directory]",
+    )
+    @click.option(
+        "--config",
+        "-c",
+        is_flag=False,
+        flag_value="",
+        default=DEFAULT_CONFIG,
+        type=click.Path(),
+        callback=validate_and_load_or_create_config,
+        show_default=True,
+        help="Specify the config file to use or leave it blank to skip using any config file",
+    )
+    @click.option(
+        "--playground",
+        "-p",
+        metavar="(PROJECT)",
+        is_flag=False,
+        flag_value="default",
+        help="Install into the default Playground or into the specified Playground project.",
+    )
     @wraps(func)
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
+
     return wrapper
 
 
 class APIURLType(click.ParamType):
     name = "url"
+
     def convert(self, value, param, ctx):
         parsed_url = urlparse(value)
         if all([re.search(r"""^https?://[^\s]+$""", value), parsed_url.scheme, parsed_url.netloc]):
@@ -157,7 +205,9 @@ def validate_package_directory(ctx, param, directory: str) -> str:
     if not os.path.exists(directory):
         raise click.BadParameter(f"""Directory "{directory}" does not exist.""")
     if not os.path.isfile(os.path.join(directory, "setup.py")):
-        raise click.BadParameter(f"""Directory "{directory}" does not contain a setup.py file, so it is not the directory of a valid Python package.""")
+        raise click.BadParameter(
+            f"""Directory "{directory}" does not contain a setup.py file, so it is not the directory of a valid Python package."""
+        )
     else:
         return directory
 
@@ -187,6 +237,7 @@ def validate_and_load_or_create_config(ctx, param, config: str) -> tuple[str, li
 # -----------------------------------------------------------------------------
 # utility functions
 # -----------------------------------------------------------------------------
+
 
 def name_from_url(url: str) -> str:
     if not url:
@@ -259,7 +310,11 @@ def prompt_for_api(retry: str = False, previous_url: str = None, previous_key: s
     if retry:
         if not click.confirm("Do you want to try another URL and API key?", default=True):
             raise click.Abort()
-    apiurl = click.prompt("""Base URL of your docassemble server (e.g., https://da.example.com)""", type=APIURLType(), default=previous_url)
+    apiurl = click.prompt(
+        """Base URL of your docassemble server (e.g., https://da.example.com)""",
+        type=APIURLType(),
+        default=previous_url,
+    )
     apikey = click.prompt(f"""API key of admin or developer user on {apiurl}""", default=previous_key).strip()
     return apiurl, apikey
 
@@ -270,9 +325,13 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
         api_test = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
         if api_test.status_code != 200:
             if api_test.status_code == 403:
-                click.secho(f"""\nThe API KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red")
+                click.secho(
+                    f"""\nThe API KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red"
+                )
             else:
-                click.secho(f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red")
+                click.secho(
+                    f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red"
+                )
             return False
     except Exception as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
@@ -301,7 +360,7 @@ def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: st
         return select_server(cfg=cfg, env=env, server=server)
 
 
-def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
+def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
     click.secho("Waiting for package to install...", fg="cyan")
     tries = 0
     before_wait_for_server = time.time()
@@ -315,7 +374,7 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
         except requests.exceptions.RequestException:
             pass
         if r.status_code != 200:
-            return("package_update_status returned " + str(r.status_code) + ": " + r.text)
+            return "package_update_status returned " + str(r.status_code) + ": " + r.text
         info = r.json()
         if info["status"] == "completed" or info["status"] == "unknown":
             break
@@ -328,7 +387,10 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
             success = True
     elif info.get("ok", False):
         success = True
-    if not (server_version_da == "norestart" or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")):
+    if not (
+        server_version_da == "norestart"
+        or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")
+    ):
         if DEBUG:
             click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
             click.echo("""Manually waiting for background processes.""")
@@ -348,11 +410,19 @@ def wait_for_server(playground:bool, task_id: str, apikey: str, apiurl: str, ser
 # package_installer
 # -----------------------------------------------------------------------------
 
+
 def package_installer(directory, apiurl, apikey, playground, restart):
     archive = tempfile.NamedTemporaryFile(suffix=".zip")
     zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w")
     try:
-        ignore_process = subprocess.run(["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=directory, check=False)
+        ignore_process = subprocess.run(
+            ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            cwd=directory,
+            check=False,
+        )
         ignore_process.check_returncode()
         raw_ignore = ignore_process.stdout.splitlines()
     except Exception:
@@ -364,7 +434,13 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     dependencies = {}
     for root, dirs, files in os.walk(directory, topdown=True):
         adjusted_root = os.sep.join(root.split(os.sep)[1:])
-        dirs[:] = [d for d in dirs if d not in [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"] and not d.endswith(".egg-info") and os.path.join(adjusted_root, d) not in to_ignore]
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
+            and not d.endswith(".egg-info")
+            and os.path.join(adjusted_root, d) not in to_ignore
+        ]
         if root_directory is None and ("setup.py" in files or "setup.cfg" in files):
             root_directory = root
             if "setup.py" in files:
@@ -377,24 +453,48 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                     if m:
                         for package_text in m.group(1).split(","):
                             package_name = package_text.strip()
-                            if len(package_name) >= 3 and package_name[0] == package_name[-1] and package_name[0] in (""", """):
+                            if (
+                                len(package_name) >= 3
+                                and package_name[0] == package_name[-1]
+                                and package_name[0] in (""", """)
+                            ):
                                 package_name = package_name[1:-1]
                                 mm = re.search(r"""(.*)(<=|>=|==|<|>)(.*)""", package_name)
                                 if mm:
-                                    dependencies[mm.group(1).strip()] = {"installed": False, "operator": mm.group(2), "version": mm.group(3).strip()}
+                                    dependencies[mm.group(1).strip()] = {
+                                        "installed": False,
+                                        "operator": mm.group(2),
+                                        "version": mm.group(3).strip(),
+                                    }
                                 else:
                                     dependencies[package_name] = {"installed": False, "operator": None, "version": None}
         for the_file in files:
-            if the_file.endswith("~") or the_file.endswith(".pyc") or the_file.endswith(".swp") or the_file.startswith("#") or the_file.startswith(".#") or (the_file == ".gitignore" and root_directory == root) or os.path.join(adjusted_root, the_file) in to_ignore:
+            if (
+                the_file.endswith("~")
+                or the_file.endswith(".pyc")
+                or the_file.endswith(".swp")
+                or the_file.startswith("#")
+                or the_file.startswith(".#")
+                or (the_file == ".gitignore" and root_directory == root)
+                or os.path.join(adjusted_root, the_file) in to_ignore
+            ):
                 continue
-            if not has_python_files and the_file.endswith(".py") and not (the_file == "setup.py" and root == root_directory) and the_file != "__init__.py":
+            if (
+                not has_python_files
+                and the_file.endswith(".py")
+                and not (the_file == "setup.py" and root == root_directory)
+                and the_file != "__init__.py"
+            ):
                 has_python_files = True
-            zf.write(os.path.join(root, the_file), os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")))
+            zf.write(
+                os.path.join(root, the_file),
+                os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")),
+            )
     zf.close()
     archive.seek(0)
     if restart == "no":
         should_restart = False
-    elif restart =="yes" or has_python_files:
+    elif restart == "yes" or has_python_files:
         should_restart = True
     elif len(dependencies) > 0 or this_package_name:
         try:
@@ -403,7 +503,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
         if r.status_code != 200:
-            return("/api/package returned " + str(r.status_code) + ": " + r.text)
+            return "/api/package returned " + str(r.status_code) + ": " + r.text
         installed_packages = r.json()
         already_installed = False
         for package_info in installed_packages:
@@ -413,20 +513,33 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                     condition = True
                     if dependency_info["operator"]:
                         if dependency_info["operator"] == "==":
-                            condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(
+                                dependency_info["version"]
+                            )
                         elif dependency_info["operator"] == "<=":
-                            condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(
+                                dependency_info["version"]
+                            )
                         elif dependency_info["operator"] == ">=":
-                            condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(
+                                dependency_info["version"]
+                            )
                         elif dependency_info["operator"] == "<":
-                            condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(
+                                dependency_info["version"]
+                            )
                         elif dependency_info["operator"] == ">":
-                            condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(dependency_info["version"])
+                            condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(
+                                dependency_info["version"]
+                            )
                     if condition:
                         dependency_info["installed"] = True
             if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
                 already_installed = True
-        should_restart = bool((not already_installed and len(dependencies) > 0) or not all(item["installed"] for item in dependencies.values()))
+        should_restart = bool(
+            (not already_installed and len(dependencies) > 0)
+            or not all(item["installed"] for item in dependencies.values())
+        )
     else:
         should_restart = True
     data = {}
@@ -461,12 +574,20 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 try:
                     requests.post(project_endpoint, data={"project": playground}, headers={"X-API-Key": apikey})
                 except Exception:
-                    return("create project POST returned " + project_list.text)
+                    return "create project POST returned " + project_list.text
         else:
             click.echo("\n")
-            return("playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text)
+            return (
+                "playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text
+            )
         try:
-            r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey}, timeout=600)
+            r = requests.post(
+                apiurl + "/api/playground_install",
+                data=data,
+                files={"file": archive},
+                headers={"X-API-Key": apikey},
+                timeout=600,
+            )
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -476,17 +597,33 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             except Exception:
                 error_message = ""
             if "project" not in data or error_message != "Invalid project.":
-                return("playground_install POST returned " + str(r.status_code) + ": " + r.text)
+                return "playground_install POST returned " + str(r.status_code) + ": " + r.text
             try:
-                r = requests.post(apiurl + "/api/playground/project", data={"project": data["project"]}, headers={"X-API-Key": apikey}, timeout=600)
+                r = requests.post(
+                    apiurl + "/api/playground/project",
+                    data={"project": data["project"]},
+                    headers={"X-API-Key": apikey},
+                    timeout=600,
+                )
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
             if r.status_code != 204:
-                return("needed to create playground project but POST to api/playground/project returned " + str(r.status_code) + ": " + r.text)
+                return (
+                    "needed to create playground project but POST to api/playground/project returned "
+                    + str(r.status_code)
+                    + ": "
+                    + r.text
+                )
             archive.seek(0)
             try:
-                r = requests.post(apiurl + "/api/playground_install", data=data, files={"file": archive}, headers={"X-API-Key": apikey}, timeout=600)
+                r = requests.post(
+                    apiurl + "/api/playground_install",
+                    data=data,
+                    files={"file": archive},
+                    headers={"X-API-Key": apikey},
+                    timeout=600,
+                )
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
@@ -494,14 +631,20 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             try:
                 info = r.json()
             except Exception:
-                return(r.text)
+                return r.text
             task_id = info["task_id"]
-            success = wait_for_server(playground=bool(playground), task_id=task_id, apikey=apikey, apiurl=apiurl, server_version_da=server_version_da)
+            success = wait_for_server(
+                playground=bool(playground),
+                task_id=task_id,
+                apikey=apikey,
+                apiurl=apiurl,
+                server_version_da=server_version_da,
+            )
         elif r.status_code == 204:
             success = True
         else:
             click.echo("\n")
-            return("playground_install POST returned " + str(r.status_code) + ": " + r.text)
+            return "playground_install POST returned " + str(r.status_code) + ": " + r.text
         if success:
             click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
         else:
@@ -509,15 +652,23 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             return 1
     else:
         try:
-            r = requests.post(apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey}, timeout=600)
+            r = requests.post(
+                apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey}, timeout=600
+            )
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
         if r.status_code != 200:
-            return("package POST returned " + str(r.status_code) + ": " + r.text)
+            return "package POST returned " + str(r.status_code) + ": " + r.text
         info = r.json()
         task_id = info["task_id"]
-        if wait_for_server(playground=bool(playground), task_id=task_id, apikey=apikey, apiurl=apiurl, server_version_da=server_version_da):
+        if wait_for_server(
+            playground=bool(playground),
+            task_id=task_id,
+            apikey=apikey,
+            apiurl=apiurl,
+            server_version_da=server_version_da,
+        ):
             click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
         if not should_restart:
             try:
@@ -526,7 +677,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
             if r.status_code != 204:
-                return("clear_cache returned " + str(r.status_code) + ": " + r.text)
+                return "clear_cache returned " + str(r.status_code) + ": " + r.text
     return 0
 
 
@@ -534,10 +685,18 @@ def package_installer(directory, apiurl, apikey, playground, restart):
 # install
 # =============================================================================
 
+
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_api
 @common_params_for_installation
-@click.option("--restart", "-r", type=click.Choice(["yes", "no", "auto"]), default="auto", show_default=True, help="On package install: yes, force a restart | no, do not restart | auto, only restart if the package has any .py files or if there are dependencies to be installed")
+@click.option(
+    "--restart",
+    "-r",
+    type=click.Choice(["yes", "no", "auto"]),
+    default="auto",
+    show_default=True,
+    help="On package install: yes, force a restart | no, do not restart | auto, only restart if the package has any .py files or if there are dependencies to be installed",
+)
 def install(directory, config, api, server, playground, restart):
     """
     Install a docassemble package on a docassemble server.
@@ -551,13 +710,20 @@ def install(directory, config, api, server, playground, restart):
     else:
         click.echo(f"""Location: Playground "{playground}" """)
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
-    package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
+    package_installer(
+        directory=directory,
+        apiurl=selected_server["apiurl"],
+        apikey=selected_server["apikey"],
+        playground=playground,
+        restart=restart,
+    )
     return 0
 
 
 # -----------------------------------------------------------------------------
 # watchdog & hashlib
 # -----------------------------------------------------------------------------
+
 
 def calculate_md5(filepath: str) -> str:
     hash_md5 = hashlib.md5()
@@ -571,11 +737,17 @@ def calculate_md5(filepath: str) -> str:
 
 
 @config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
-@click.option("--directory", "-d", default=os.getcwd(), type=click.Path(), help="Specify package directory [default: current directory]")
+@click.option(
+    "--directory",
+    "-d",
+    default=os.getcwd(),
+    type=click.Path(),
+    help="Specify package directory [default: current directory]",
+)
 def scan_directory(directory):
     global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
-        excluded_directories = ['.git', '.venv']
+        excluded_directories = [".git", ".venv"]
         subdirectories[:] = [d for d in subdirectories if d not in excluded_directories]
         for file in files:
             filepath = os.path.join(current_directory, file)
@@ -612,7 +784,9 @@ class WatchHandler(FileSystemEventHandler):
         if event.event_type == "created" or event.event_type == "modified":
             if not matches_ignore_patterns(path=event.src_path.replace("\\", "/"), directory=self.directory):
                 new_checksum = calculate_md5(event.src_path)
-                if event.src_path not in FILE_CHECKSUMS or (new_checksum and FILE_CHECKSUMS[event.src_path] != new_checksum):
+                if event.src_path not in FILE_CHECKSUMS or (
+                    new_checksum and FILE_CHECKSUMS[event.src_path] != new_checksum
+                ):
                     FILE_CHECKSUMS[event.src_path] = new_checksum
                     LAST_MODIFIED["time"] = time.time()
                     LAST_MODIFIED["files"][str(event.src_path)] = True
@@ -624,11 +798,26 @@ class WatchHandler(FileSystemEventHandler):
 # watch
 # =============================================================================
 
+
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_installation
 @common_params_for_api
-@click.option("--restart", "-r", type=click.Choice(["yes", "no", "auto"]), default="auto", show_default=True, help="On package install: yes, force a restart | no, do not restart | auto, only restart if any .py files were changed")
-@click.option("--buffer", "-b", metavar="SECONDS", default=3, show_default=True, help="(On server restart only) Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.")
+@click.option(
+    "--restart",
+    "-r",
+    type=click.Choice(["yes", "no", "auto"]),
+    default="auto",
+    show_default=True,
+    help="On package install: yes, force a restart | no, do not restart | auto, only restart if any .py files were changed",
+)
+@click.option(
+    "--buffer",
+    "-b",
+    metavar="SECONDS",
+    default=3,
+    show_default=True,
+    help="(On server restart only) Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.",
+)
 def watch(directory, config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
@@ -663,19 +852,26 @@ def watch(directory, config, api, server, playground, restart, buffer):
                 LAST_MODIFIED["time"] = 0
                 LAST_MODIFIED["files"] = {}
                 LAST_MODIFIED["restart"] = False
-                package_installer(directory=directory, apiurl=selected_server["apiurl"], apikey=selected_server["apikey"], playground=playground, restart=restart)
+                package_installer(
+                    directory=directory,
+                    apiurl=selected_server["apiurl"],
+                    apikey=selected_server["apikey"],
+                    playground=playground,
+                    restart=restart,
+                )
             time.sleep(1)
     except Exception as e:
         click.echo(f"\nException occurred: {e}")
     finally:
         observer.stop()
         observer.join()
-        return("""\nStopping "docassemblecli3 watch".""")
+        return """\nStopping "docassemblecli3 watch"."""
 
 
 # =============================================================================
 # create
 # =============================================================================
+
 
 @cli.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--package", metavar="PACKAGE", help="Name of the package you want to create")
@@ -692,10 +888,10 @@ def create(package, developer_name, developer_email, description, url, license, 
     """
     pkgname = package
     if not pkgname:
-       pkgname = click.prompt("Name of the package you want to create (e.g., childsupport)")
+        pkgname = click.prompt("Name of the package you want to create (e.g., childsupport)")
     pkgname = re.sub(r"\s", "", pkgname)
     if not pkgname:
-        return("The package name you entered is invalid.")
+        return "The package name you entered is invalid."
     pkgname = re.sub(r"^docassemble[\-\.]", "", pkgname, flags=re.IGNORECASE)
     if output:
         packagedir = output
@@ -703,10 +899,10 @@ def create(package, developer_name, developer_email, description, url, license, 
         packagedir = "docassemble-" + pkgname
     if os.path.exists(packagedir):
         if not os.path.isdir(packagedir):
-            return("Cannot create the directory " + packagedir + " because the path already exists.")
+            return "Cannot create the directory " + packagedir + " because the path already exists."
         dir_listing = list(os.listdir(packagedir))
         if "setup.py" in dir_listing or "setup.cfg" in dir_listing:
-            return("The directory " + packagedir + " already has a package in it.")
+            return "The directory " + packagedir + " already has a package in it."
     else:
         os.makedirs(packagedir, exist_ok=True)
     if not developer_name:
@@ -735,7 +931,12 @@ __import__("pkg_resources").declare_namespace(__name__)
 
 """
     if "MIT" in license:
-        licensetext = "The MIT License (MIT)\n\nCopyright (c) " + str(datetime.datetime.now().year) + " " + developer_name + """
+        licensetext = (
+            "The MIT License (MIT)\n\nCopyright (c) "
+            + str(datetime.datetime.now().year)
+            + " "
+            + developer_name
+            + """
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -755,10 +956,21 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
+        )
     else:
         licensetext = license + "\n"
 
-    readme = "# docassemble." + pkgname + "\n\n" + description + "\n\n## Author\n\n" + developer_name + ", " + developer_email + "\n"
+    readme = (
+        "# docassemble."
+        + pkgname
+        + "\n\n"
+        + description
+        + "\n\n## Author\n\n"
+        + developer_name
+        + ", "
+        + developer_email
+        + "\n"
+    )
     manifestin = """\
 include README.md
 """
@@ -813,22 +1025,44 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
     return out
 
 """
-    setuppy += "setup(name=" + repr("docassemble." + pkgname) + """,
-      version=""" + repr(version) + """,
-      description=(""" + repr(description) + """),
-      long_description=""" + repr(readme) + """,
+    setuppy += (
+        "setup(name="
+        + repr("docassemble." + pkgname)
+        + """,
+      version="""
+        + repr(version)
+        + """,
+      description=("""
+        + repr(description)
+        + """),
+      long_description="""
+        + repr(readme)
+        + """,
       long_description_content_type="text/markdown",
-      author=""" + repr(developer_name) + """,
-      author_email=""" + repr(developer_email) + """,
-      license=""" + repr(license) + """,
-      url=""" + repr(package_url) + """,
+      author="""
+        + repr(developer_name)
+        + """,
+      author_email="""
+        + repr(developer_email)
+        + """,
+      license="""
+        + repr(license)
+        + """,
+      url="""
+        + repr(package_url)
+        + """,
       packages=find_packages(),
       namespace_packages=["docassemble"],
       install_requires=[],
       zip_safe=False,
-      package_data=find_package_data(where='docassemble/""" + pkgname + """/', package='docassemble.""" + pkgname + """'),
+      package_data=find_package_data(where='docassemble/"""
+        + pkgname
+        + """/', package='docassemble."""
+        + pkgname
+        + """'),
      )
 """
+    )
     # maindir = os.path.join(packagedir, "docassemble", pkgname)
     questionsdir = os.path.join(packagedir, "docassemble", pkgname, "data", "questions")
     templatesdir = os.path.join(packagedir, "docassemble", pkgname, "data", "templates")
@@ -842,7 +1076,7 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
         os.makedirs(staticdir, exist_ok=True)
     if not os.path.isdir(sourcesdir):
         os.makedirs(sourcesdir, exist_ok=True)
-    with open(os.path.join(packagedir, '.gitignore'), 'w', encoding='utf-8') as the_file:
+    with open(os.path.join(packagedir, ".gitignore"), "w", encoding="utf-8") as the_file:
         the_file.write(GITIGNORE)
     with open(os.path.join(packagedir, "README.md"), "w", encoding="utf-8") as the_file:
         the_file.write(readme)
@@ -865,9 +1099,16 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
 # config
 # =============================================================================
 
+
 @config.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_config
-@click.option("--api", "-a", type=(APIURLType(), str), default=(None, None), help="URL of the docassemble server and API key of the user (admin or developer)")
+@click.option(
+    "--api",
+    "-a",
+    type=(APIURLType(), str),
+    default=(None, None),
+    help="URL of the docassemble server and API key of the user (admin or developer)",
+)
 def add(config, api):
     """
     Add a server to the config file.
@@ -935,7 +1176,9 @@ def new(config):
 def server_version(config, api, server):
     selected_server = select_server(*config, *api, server)
     try:
-        r = requests.get(selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600)
+        r = requests.get(
+            selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600
+        )
         if DEBUG:
             click.echo(type(r.status_code))
             click.echo(r.status_code)
@@ -964,4 +1207,3 @@ def test(config, api, server):
     apikey = selected_server["apikey"]
     click.echo(apiurl)
     test_apiurl_apikey(apiurl=apiurl, apikey=apikey)
-
