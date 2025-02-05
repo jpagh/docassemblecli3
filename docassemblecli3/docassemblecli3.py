@@ -34,6 +34,9 @@ FILE_CHECKSUMS = {}
 global DEBUG
 DEBUG = False
 
+global GITMATCH_COMPILED
+GITMATCH_COMPILED = None
+
 global GITIGNORE
 GITIGNORE = """\
 __pycache__/
@@ -560,33 +563,41 @@ def calculate_md5(filepath: str) -> str:
     hash_md5 = hashlib.md5()
     try:
         with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
+            while chunk := f.read(4096):
                 hash_md5.update(chunk)
     except FileNotFoundError:
         return ""
     return hash_md5.hexdigest()
 
 
+@config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
+@click.option("--directory", "-d", default=os.getcwd(), type=click.Path(), help="Specify package directory [default: current directory]")
 def scan_directory(directory):
     global FILE_CHECKSUMS
-    for root, _, files in os.walk(directory):
+    for current_directory, subdirectories, files in os.walk(directory):
+        excluded_directories = ['.git', '.venv']
+        subdirectories[:] = [d for d in subdirectories if d not in excluded_directories]
         for file in files:
-            filepath = os.path.join(root, file)
+            filepath = os.path.join(current_directory, file)
             if not matches_ignore_patterns(path=filepath, directory=directory):
                 FILE_CHECKSUMS[filepath] = calculate_md5(filepath)
 
 
 def matches_ignore_patterns(path: str, directory: str) -> bool:
-    if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
-        with open(gitignore_path) as file:
-            ignore_patterns = [line.strip() for line in file]
-    else:
-        ignore_patterns = GITIGNORE.split("\n")
-    ignore_patterns.extend([".git/", ".gitignore"])
-    gm = gitmatch.compile(ignore_patterns)
+    global GITMATCH_COMPILED
+    if not GITMATCH_COMPILED:
+        if DEBUG:
+            click.echo("GITMATCH_COMPILED")
+        if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
+            with open(gitignore_path) as file:
+                ignore_patterns = [line.strip() for line in file]
+        else:
+            ignore_patterns = GITIGNORE.split("\n")
+        ignore_patterns.extend([".git/", ".gitignore"])
+        GITMATCH_COMPILED = gitmatch.compile(ignore_patterns)
     # Convert the absolute path to a relative path for gitmatch to work
     path = os.path.relpath(path, directory)
-    return gm.match(path=path)
+    return GITMATCH_COMPILED.match(path=path)
 
 
 class WatchHandler(FileSystemEventHandler):
