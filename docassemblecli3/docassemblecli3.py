@@ -736,14 +736,6 @@ def calculate_md5(filepath: str) -> str:
     return hash_md5.hexdigest()
 
 
-@config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
-@click.option(
-    "--directory",
-    "-d",
-    default=os.getcwd(),
-    type=click.Path(),
-    help="Specify package directory [default: current directory]",
-)
 def scan_directory(directory):
     global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
