@@ -18,6 +18,7 @@ from packaging import version as packaging_version
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
 
@@ -92,6 +93,7 @@ share/python-wheels/
 # -----------------------------------------------------------------------------
 # click
 # -----------------------------------------------------------------------------
+
 
 CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 
@@ -260,7 +262,9 @@ def display_servers(env: list = None) -> list[str]:
     return servers
 
 
-def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "", **kwargs) -> dict:
+def select_server(
+    cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "", **kwargs
+) -> dict:
     if apiurl and apikey:
         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
     if isinstance(env, list):
@@ -273,9 +277,9 @@ def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey:
                         return item
                 raise click.BadParameter(f"""Server "{server}" was not found.""", param_hint="--server")
         if len(env) > 0:
-            if "watch" in kwargs:
+            if "directory" in kwargs:
                 for item in env:
-                    if item.get("path", None) == kwargs["watch"]:
+                    if item.get("directory", None) == kwargs["directory"]:
                         return item
             return env[0]
     if "DOCASSEMBLEAPIURL" in os.environ and "DOCASSEMBLEAPIKEY" in os.environ:
@@ -285,7 +289,9 @@ def select_server(cfg: str = None, env: list = None, apiurl: str = None, apikey:
     return add_server_to_env(cfg, env)[0]
 
 
-def add_or_update_env(env: list = None, apiurl: str = "", apikey: str = "") -> list:
+def add_or_update_env(
+    env: list = None, apiurl: str = "", apikey: str = "", directory: str = "", playground: str = ""
+) -> list:
     if not env:
         env: list = []
     apiname: str = name_from_url(apiurl)
@@ -294,11 +300,20 @@ def add_or_update_env(env: list = None, apiurl: str = "", apikey: str = "") -> l
         if item.get("name", None) == apiname:
             item["apiurl"] = apiurl
             item["apikey"] = apikey
+            if directory:
+                item["directory"] = directory
+            if playground:
+                item["playground"] = playground
             found = True
             click.echo(f"""Server "{apiname}" was found and updated.""")
             break
     if not found:
-        env.append({"apiurl": apiurl, "apikey": apikey, "name": apiname})
+        new_server = {"apiurl": apiurl, "apikey": apikey, "name": apiname}
+        if directory:
+            new_server["directory"] = directory
+        if playground:
+            new_server["playground"] = playground
+        env.append(new_server)
     return env
 
 
@@ -348,23 +363,23 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
     return True
 
 
-def add_server_to_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None):
+def add_server_to_env(
+    cfg: str = None,
+    env: list = None,
+    apiurl: str = None,
+    apikey: str = None,
+    directory: str = None,
+    playground: str = None,
+):
     if not apiurl or not apikey:
         apiurl, apikey = prompt_for_api()
     while not test_apiurl_apikey(apiurl=apiurl, apikey=apikey):
         apiurl, apikey = prompt_for_api(retry=True, previous_url=apiurl, previous_key=apikey)
-    env = add_or_update_env(env=env, apiurl=apiurl, apikey=apikey)
+    env = add_or_update_env(env=env, apiurl=apiurl, apikey=apikey, directory=directory, playground=playground)
     if cfg:
         if save_config(cfg, env):
             click.echo(f"""Configuration saved: {cfg}""")
     return env
-
-
-# def select_env(cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = None) -> dict:
-#     if apiurl and apikey:
-#         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
-#     else:
-#         return select_server(cfg=cfg, env=env, server=server)
 
 
 def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
@@ -824,8 +839,10 @@ class WatchHandler(FileSystemEventHandler):
 def watch(directory, config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
+
+    If the --directory option is not specified, `watch` will look for a directory entry in the config file. The corresponding server entry will be selected automatically if the "directory" key in the config file matches the directory being watched. If a match is found, the "playground" key in the config file will be used if it exists and if no --playground option was specified.
     """
-    selected_server = select_server(*config, *api, server, watch=directory)
+    selected_server = select_server(*config, *api, server, directory=directory)
     restart_param = restart
     scan_directory(directory)
     global LAST_MODIFIED
@@ -836,11 +853,16 @@ def watch(directory, config, api, server, playground, restart, buffer):
     click.echo()
     click.echo(f"""Server: {selected_server["name"]}""")
 
-    if "path" in selected_server and selected_server["path"] == directory:
-        playground = selected_server.get("playground", playground)
     if not playground:
-        click.echo("Location: Package")
-    else:
+        if (
+            "directory" in selected_server
+            and selected_server["directory"] == directory
+            and "playground" in selected_server
+        ):
+            playground = selected_server["playground"]
+        else:
+            click.echo("Location: Package")
+    if playground:
         click.echo(f"""Location: Playground "{playground}" """)
 
     click.echo(f"""Watching: {directory}""")
@@ -1109,22 +1131,15 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
 
 @config.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_config
-@click.option(
-    "--api",
-    "-a",
-    type=(APIURLType(), str),
-    default=(None, None),
-    help="URL of the docassemble server and API key of the user (admin or developer)",
-)
-def add(config, api):
+@common_params_for_api
+@common_params_for_installation
+def add(config, api, directory, playground):
     """
     Add a server to the config file.
     """
     apiurl, apikey = api
-    if not apiurl or not apikey:
-        apiurl, apikey = prompt_for_api(previous_url=apiurl, previous_key=apikey)
     cfg, env = config
-    add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)
+    add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey, directory=directory, playground=playground)
 
 
 @config.command(context_settings=CONTEXT_SETTINGS)
