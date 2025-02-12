@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "docassemblecli3"
-version = "0.3.4"
+version = "0.3.5"
 authors = [
     {name = "Jack Adamson", email = "jackadamson@gmail.com"},
     {name = "Jonathan Pyle", email = "jhpyle@gmail.com"},
