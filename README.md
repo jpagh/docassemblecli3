@@ -345,6 +345,7 @@ With this configuration:
 - `da watch` in `/path/to/docassemble-mypackage` will automatically use this server
 - It will install to the "testing" playground project
 - It will install the package once when `watch` starts
+
 ## How it works
 
 The `install` command is just a simple Python script that creates a ZIP file and
