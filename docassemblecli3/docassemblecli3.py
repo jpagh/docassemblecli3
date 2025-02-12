@@ -747,13 +747,14 @@ def install(directory, config, api, server, playground, restart):
 # -----------------------------------------------------------------------------
 
 
-def calculate_md5(filepath: str) -> str:
+def calculate_checksum(filepath: str) -> str:
     hash_md5 = hashlib.md5()
     try:
         with open(filepath, "rb") as f:
             while chunk := f.read(4096):
                 hash_md5.update(chunk)
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError) as e:
+        click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
     return hash_md5.hexdigest()
 
@@ -768,7 +769,7 @@ def scan_directory(directory):
         for file in files:
             filepath = os.path.join(current_directory, file)
             if not matches_ignore_patterns(path=filepath, directory=directory):
-                FILE_CHECKSUMS[filepath] = calculate_md5(filepath)
+                FILE_CHECKSUMS[filepath] = calculate_checksum(filepath)
     if DEBUG:
         click.secho("Scanning complete.", fg="green")
 
@@ -801,7 +802,7 @@ class WatchHandler(FileSystemEventHandler):
             return None
         if event.event_type == "created" or event.event_type == "modified":
             if not matches_ignore_patterns(path=event.src_path.replace("\\", "/"), directory=self.directory):
-                new_checksum = calculate_md5(event.src_path)
+                new_checksum = calculate_checksum(event.src_path)
                 if event.src_path not in FILE_CHECKSUMS or (
                     new_checksum and FILE_CHECKSUMS[event.src_path] != new_checksum
                 ):
