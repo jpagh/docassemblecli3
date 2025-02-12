@@ -259,6 +259,12 @@ def display_servers(env: list = None) -> list[str]:
             servers.append(item.get("name", ""))
         else:
             servers.append(item.get("name", "") + " (default)")
+        if "playground" in item:
+            servers.append(f"""  playground: {item["playground"]}""")
+        if "directory" in item:
+            servers.append(f"""  directory: {item["directory"]}""")
+        if "startup" in item:
+            servers.append(f"""  startup: {item["startup"]}""")
     return servers
 
 
@@ -865,6 +871,17 @@ def watch(directory, config, api, server, playground, restart, buffer):
             click.echo("Location: Package")
     if playground:
         click.echo(f"""Location: Playground "{playground}" """)
+
+    if "startup" in selected_server and selected_server["startup"] == "install":
+        click.secho("""Installing on startup.""", fg="cyan")
+        package_installer(
+            directory=directory,
+            apiurl=selected_server["apiurl"],
+            apikey=selected_server["apikey"],
+            playground=playground,
+            restart=restart,
+        )
+        click.echo("")
 
     click.echo(f"""Watching: {directory}""")
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
