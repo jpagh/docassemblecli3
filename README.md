@@ -266,11 +266,11 @@ and `.gitignore` file are both also ignored by `watch` (note: don't add them to
 your `.gitignore`). The following directories are always ignored by `watch`: 
 `.git`, `__pycache__`, `.mypy_cache`, `.venv`, `.history`, `build`.
 
-If you manually add a `path` key to a server in your `.docassemblecli` config
+If you have a `directory` key for the server in your `.docassemblecli` config
 file, it will cause that server to be used if no `server` is provided and the
-`path` matches the `directory` that `watch` was given
-[default: current directory]. Additionally, if you manually add a `playground`
-key to that server, it will be used when using `watch`.
+`directory` matches the `directory` that `watch` was given
+[default: current directory]. Additionally, if there is a `playground` key for
+that server, it will be used when using `watch`.
 
 #### watchdog
 
@@ -324,6 +324,27 @@ easy to use and will prompt you as necessary.
     remove   Remove a server from the config file.
     test     Test the URL and API key.
 
+The `.docassemblecli` config file can store additional configuration for each server:
+
+- `directory`: If the current or provided directory matches this then this server will be selected
+- `playground`: Default playground project to use if `directory` matches
+- `startup`: If set to "install", automatically installs package when `watch` starts
+
+For example, your `.docassemblecli` file might look like this:
+
+```yaml
+- apiurl: https://da.example.com
+  apikey: H3PWMKJOIVAXL4PWUJH3HG7EKPFU5GYT
+  name: da.example.com
+  playground: testing
+  directory: /path/to/docassemble-mypackage
+  startup: install
+```
+
+With this configuration:
+- `da watch` in `/path/to/docassemble-mypackage` will automatically use this server
+- It will install to the "testing" playground project
+- It will install the package once when `watch` starts
 ## How it works
 
 The `install` command is just a simple Python script that creates a ZIP file and
