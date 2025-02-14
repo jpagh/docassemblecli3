@@ -759,7 +759,7 @@ def calculate_checksum(filepath: str) -> str:
         with open(filepath, "rb") as f:
             while chunk := f.read(4096):
                 hash_md5.update(chunk)
-    except (FileNotFoundError, PermissionError) as e:
+    except (Exception) as e:
         click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
     return hash_md5.hexdigest()
