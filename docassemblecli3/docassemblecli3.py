@@ -5,6 +5,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from functools import wraps
@@ -17,7 +18,6 @@ import yaml
 from packaging import version as packaging_version
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-
 
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
@@ -389,49 +389,98 @@ def add_server_to_env(
 
 
 def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
-    click.secho("Waiting for package to install...", fg="cyan")
-    tries = 0
-    before_wait_for_server = time.time()
-    while tries < 300:
-        if playground:
-            full_url = apiurl + "/api/restart_status"
-        else:
-            full_url = apiurl + "/api/package_update_status"
-        try:
-            r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
-        except requests.exceptions.RequestException:
-            pass
-        if r.status_code != 200:
-            return "package_update_status returned " + str(r.status_code) + ": " + r.text
-        info = r.json()
-        if info["status"] == "completed" or info["status"] == "unknown":
-            break
-        time.sleep(1)
-        tries += 1
-    after_wait_for_server = time.time()
-    success = False
-    if playground:
-        if info.get("status", None) == "completed":
-            success = True
-    elif info.get("ok", False):
-        success = True
-    if not (
-        server_version_da == "norestart"
-        or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")
+    def wait_for_server_response(
+        playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"
     ):
-        if DEBUG:
-            click.echo(f"""Package install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
-            click.echo("""Manually waiting for background processes.""")
-        time.sleep(after_wait_for_server - before_wait_for_server)
-    if success:
-        return True
-    click.secho("\nUnable to install package.\n", fg="red")
-    if not playground:
-        if "error_message" in info and isinstance(info["error_message"], str):
-            click.secho(info["error_message"], fg="red")
-        else:
-            click.echo(info)
-    return False
+        tries = 0
+        before_wait_for_server = time.time()
+        while tries < 300:
+            if playground:
+                full_url = apiurl + "/api/restart_status"
+            else:
+                full_url = apiurl + "/api/package_update_status"
+            try:
+                r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
+            except requests.exceptions.RequestException:
+                pass
+            if r.status_code != 200:
+                return "package_update_status returned " + str(r.status_code) + ": " + r.text
+            info = r.json()
+            if info["status"] == "completed" or info["status"] == "unknown":
+                break
+            time.sleep(1)
+            tries += 1
+        after_wait_for_server = time.time()
+        success = False
+        if playground:
+            if info.get("status", None) == "completed":
+                success = True
+        elif info.get("ok", False):
+            success = True
+        if not (
+            server_version_da == "norestart"
+            or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")
+        ):
+            if DEBUG:
+                click.echo(f"""\rPackage install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
+                click.echo("""\rManually waiting for background processes.""")
+            time.sleep(after_wait_for_server - before_wait_for_server)
+        if success:
+            return True
+        click.secho("\nUnable to install package.\n", fg="red")
+        if not playground:
+            if "error_message" in info and isinstance(info["error_message"], str):
+                click.secho(info["error_message"], fg="red")
+            else:
+                click.echo(info)
+        return False
+
+    def format_time(seconds):
+        """Format seconds as HH:MM:SS"""
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    click.secho("Waiting for package to install...", fg="cyan")
+
+    result = [None]  # Use list to store result from thread
+    exception = [None]  # Use list to store any exception
+
+    def run_wait_for_server():
+        try:
+            result[0] = wait_for_server_response(
+                playground=bool(playground),
+                task_id=task_id,
+                apikey=apikey,
+                apiurl=apiurl,
+                server_version_da=server_version_da,
+            )
+        except Exception as e:
+            exception[0] = e
+
+    # Start the installer in a separate thread
+    installer_thread = threading.Thread(target=run_wait_for_server)
+    installer_thread.daemon = True
+    installer_thread.start()
+
+    # Display timer while installer runs
+    start_time = time.time()
+    while installer_thread.is_alive():
+        elapsed = int(time.time() - start_time)
+        click.echo(f"""\rElapsed: {format_time(elapsed)}""", nl=False)
+        time.sleep(1)
+
+    # Wait for thread to complete
+    installer_thread.join()
+
+    click.echo()
+
+    # Re-raise any exception that occurred
+    if exception[0]:
+        raise exception[0]
+
+    return result[0]
 
 
 # -----------------------------------------------------------------------------
@@ -759,7 +808,7 @@ def calculate_checksum(filepath: str) -> str:
         with open(filepath, "rb") as f:
             while chunk := f.read(4096):
                 hash_md5.update(chunk)
-    except (Exception) as e:
+    except Exception as e:
         click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
     return hash_md5.hexdigest()

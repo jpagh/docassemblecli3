@@ -23,7 +23,7 @@ released under the MIT License.
 ## Prerequisites
 
 This program should only require that you have Python 3.10 installed on your
-computer, but it was developed and tested with Python 3.12. Please report any
+computer, but it was developed and tested with Python 3.13. Please report any
 bugs or errors you experience.
 
 ## Installation
