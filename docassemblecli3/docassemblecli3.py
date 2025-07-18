@@ -35,6 +35,9 @@ FILE_CHECKSUMS = {}
 global DEBUG
 DEBUG = False
 
+global BELL
+BELL = "\a"
+
 global EXCLUDED_DIRECTORIES
 EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
 
@@ -101,6 +104,12 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
 @click.group(context_settings=CONTEXT_SETTINGS)
 @click.version_option()
 @click.option(
+    "--bell/--no-bell",
+    default=True,
+    show_default=True,
+    help="Play bell sound notification.",
+)
+@click.option(
     "--color/--no-color",
     "-C/-N",
     default=None,
@@ -108,10 +117,13 @@ CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
     help="Overrides color auto-detection in interactive terminals.",
 )
 @click.option("--debug/--no-debug", default=False, hidden=True)
-def cli(color, debug):
+def cli(bell, color, debug):
     """
     Commands for working with docassemble packages and servers.
     """
+    if not bell:
+        global BELL
+        BELL = ""
     CONTEXT_SETTINGS["color"] = color
     if debug:
         global DEBUG
@@ -354,18 +366,18 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
         if api_test.status_code != 200:
             if api_test.status_code == 403:
                 click.secho(
-                    f"""\nThe API KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red"
+                    f"""\nThe API KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n{BELL}""", fg="red"
                 )
             else:
                 click.secho(
-                    f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n""", fg="red"
+                    f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n{BELL}""", fg="red"
                 )
             return False
     except Exception as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
         click.echo(f"""{err}\n""")
         return False
-    click.secho("Success!", fg="green")
+    click.secho(f"Success!{BELL}", fg="green")
     return True
 
 
@@ -723,9 +735,9 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.echo("\n")
             return "playground_install POST returned " + str(r.status_code) + ": " + r.text
         if success:
-            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
+            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.{BELL}""", fg="green")
         else:
-            click.secho(f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n""", fg="red")
+            click.secho(f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""", fg="red")
             return 1
     else:
         try:
@@ -746,12 +758,12 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             apiurl=apiurl,
             server_version_da=server_version_da,
         ):
-            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.""", fg="green")
+            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.{BELL}""", fg="green")
         if not should_restart:
             try:
                 r = requests.post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
             except Exception as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                click.secho(f"""\n{err.__class__.__name__}{BELL}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
             if r.status_code != 204:
                 return "clear_cache returned " + str(r.status_code) + ": " + r.text

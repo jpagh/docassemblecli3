@@ -42,9 +42,11 @@ but feel free to use whichever you prefer.
 
     Usage: da [OPTIONS] COMMAND [ARGS]...
 
-    Commands for interacting with docassemble servers.
+    Commands for working with docassemble packages and servers.
 
     Options:
+    --version                     Show the version and exit.
+    --bell / --no-bell            Play bell sound notification.  [default: bell]
     -C, --color / -N, --no-color  Overrides color auto-detection in interactive
                                     terminals.
     -h, --help                    Show this message and exit.
