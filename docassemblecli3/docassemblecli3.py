@@ -528,7 +528,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             for d in dirs
             if d not in EXCLUDED_DIRECTORIES
             and not d.endswith(".egg-info")
-            and os.path.join(adjusted_root, d) not in to_ignore
+            and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
         ]
         if root_directory is None and ("setup.py" in files or "setup.cfg" in files):
             root_directory = root
@@ -565,7 +565,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 or the_file.startswith("#")
                 or the_file.startswith(".#")
                 or (the_file == ".gitignore" and root_directory == root)
-                or os.path.join(adjusted_root, the_file) in to_ignore
+                or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
             ):
                 continue
             if (
