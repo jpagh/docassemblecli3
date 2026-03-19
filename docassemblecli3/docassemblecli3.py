@@ -522,7 +522,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     this_package_name = None
     dependencies = {}
     for root, dirs, files in os.walk(directory, topdown=True):
-        adjusted_root = os.sep.join(root.split(os.sep)[1:])
+        adjusted_root = os.path.relpath(root, directory)
         dirs[:] = [
             d
             for d in dirs
