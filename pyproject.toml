@@ -1,39 +1,39 @@
 [build-system]
-requires = ["flit_core >=3.2,<4"]
-build-backend = "flit_core.buildapi"
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=64"]
 
 [project]
-name = "docassemblecli3"
-version = "0.5.1"
 authors = [
-    {name = "Jack Adamson", email = "jackadamson@gmail.com"},
-    {name = "Jonathan Pyle", email = "jhpyle@gmail.com"},
+    { email = "jackadamson@gmail.com", name = "Jack Adamson" },
+    { email = "jhpyle@gmail.com", name = "Jonathan Pyle" },
 ]
-readme = "README.md"
-license = {file = "LICENSE"}
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
 ]
-dynamic = ["description"]
-requires-python = ">= 3.10"
-keywords = ["docassemble"]
 dependencies = [
+    "PyYAML",
     "click",
     "gitmatch",
     "packaging",
-    "PyYAML",
     "requests",
     "watchdog",
 ]
+description = "Multi-platform CLI utility for working with docassemble packages and servers"
+keywords = ["docassemble"]
+license = { file = "LICENSE" }
+name = "docassemblecli3"
+readme = "README.md"
+requires-python = ">= 3.10"
+version = "0.5.1"
 
 [project.urls]
-"Homepage" = "https://github.com/jpagh/docassemblecli3"
 "Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
+"Homepage" = "https://github.com/jpagh/docassemblecli3"
 
 [project.scripts]
-docassemblecli3 = "docassemblecli3:cli"
 da = "docassemblecli3:cli"
+docassemblecli3 = "docassemblecli3:cli"
 
 [tool.ruff]
 line-length = 120
