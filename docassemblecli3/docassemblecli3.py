@@ -50,6 +50,15 @@ EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history
 global GITMATCH_COMPILED
 GITMATCH_COMPILED = None
 
+global GITMATCH_DIRECTORY
+GITMATCH_DIRECTORY = None
+
+global GITIGNORE_MTIME
+GITIGNORE_MTIME = None
+
+global WATCH_IGNORE_MTIME
+WATCH_IGNORE_MTIME = None
+
 global WATCH_SETTLE_DELAY
 WATCH_SETTLE_DELAY = 0.6
 
@@ -69,6 +78,7 @@ dmypy.json
 ~*
 *.~lock.*
 .#*
+.coverage*
 en
 */auto
 .history/
@@ -103,6 +113,9 @@ var/
 wheels/
 share/python-wheels/
 """
+
+global WATCH_IGNORE_FILE
+WATCH_IGNORE_FILE = ".dawatchignore"
 
 
 # -----------------------------------------------------------------------------
@@ -358,6 +371,10 @@ def normalize_license_string(license_name: str) -> str:
     return "LicenseRef-" + re.sub(r"[^A-Za-z\-0-9]", "", normalized_license)
 
 
+def announce_installed() -> None:
+    click.secho(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Installed.{BELL}", fg="green")
+
+
 def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
     deduplicated = {}
     for file_path, event_types in file_events.items():
@@ -400,7 +417,6 @@ def upload_playground_files(apiurl: str, apikey: str, playground: str, changed_f
         if not files_to_upload:
             continue
         for index, file_path in enumerate(files_to_upload):
-            click.echo(f"Uploading {file_path} to {folder}")
             post_data = {
                 "folder": folder,
                 "restart": "1" if folder == "modules" and index == len(files_to_upload) - 1 else "0",
@@ -931,7 +947,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             click.echo("\n")
             return "playground_install POST returned " + str(r.status_code) + ": " + r.text
         if success:
-            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.{BELL}""", fg="green")
+            announce_installed()
         else:
             click.secho(
                 f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""", fg="red"
@@ -956,7 +972,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             apiurl=apiurl,
             server_version_da=server_version_da,
         ):
-            click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.{BELL}""", fg="green")
+            announce_installed()
         if not should_restart:
             try:
                 r = requests.post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
@@ -1139,6 +1155,8 @@ def calculate_checksum(filepath: str) -> str:
         with open(filepath, "rb") as f:
             while chunk := f.read(4096):
                 hash_md5.update(chunk)
+    except FileNotFoundError:
+        return ""
     except Exception as e:
         click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
@@ -1160,18 +1178,44 @@ def scan_directory(directory):
         click.secho("Scanning complete.", fg="green")
 
 
+def read_ignore_file(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as file:
+        return [line.rstrip("\r\n") for line in file]
+
+
+def load_ignore_patterns(directory: str) -> list[str]:
+    gitignore_path = os.path.join(directory, ".gitignore")
+    if os.path.exists(gitignore_path):
+        ignore_patterns = read_ignore_file(gitignore_path)
+    else:
+        ignore_patterns = GITIGNORE.split("\n")
+
+    watch_ignore_path = os.path.join(directory, WATCH_IGNORE_FILE)
+    if os.path.exists(watch_ignore_path):
+        ignore_patterns.extend(read_ignore_file(watch_ignore_path))
+
+    ignore_patterns.extend([".git/", ".gitignore", WATCH_IGNORE_FILE])
+    return ignore_patterns
+
+
 def matches_ignore_patterns(path: str, directory: str) -> bool:
-    global GITMATCH_COMPILED
-    if not GITMATCH_COMPILED:
+    global WATCH_IGNORE_MTIME, GITIGNORE_MTIME, GITMATCH_COMPILED, GITMATCH_DIRECTORY
+    gitignore_path = os.path.join(directory, ".gitignore")
+    gitignore_mtime = os.path.getmtime(gitignore_path) if os.path.exists(gitignore_path) else None
+    watch_ignore_path = os.path.join(directory, WATCH_IGNORE_FILE)
+    watch_ignore_mtime = os.path.getmtime(watch_ignore_path) if os.path.exists(watch_ignore_path) else None
+    if (
+        not GITMATCH_COMPILED
+        or GITMATCH_DIRECTORY != directory
+        or GITIGNORE_MTIME != gitignore_mtime
+        or WATCH_IGNORE_MTIME != watch_ignore_mtime
+    ):
         if DEBUG:
             click.echo("GITMATCH_COMPILED")
-        if os.path.exists(gitignore_path := os.path.join(directory, ".gitignore")):
-            with open(gitignore_path) as file:
-                ignore_patterns = [line.strip() for line in file]
-        else:
-            ignore_patterns = GITIGNORE.split("\n")
-        ignore_patterns.extend([".git/", ".gitignore"])
-        GITMATCH_COMPILED = gitmatch.compile(ignore_patterns)
+        GITMATCH_COMPILED = gitmatch.compile(load_ignore_patterns(directory))
+        GITMATCH_DIRECTORY = directory
+        GITIGNORE_MTIME = gitignore_mtime
+        WATCH_IGNORE_MTIME = watch_ignore_mtime
     # Convert the absolute path to a relative path for gitmatch to work
     path = os.path.relpath(path, directory)
     return GITMATCH_COMPILED.match(path=path)
@@ -1310,6 +1354,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
                         changed_files=changed_files,
                     )
                     if uploaded:
+                        announce_installed()
                         install_result = 0
 
                 if install_result is None:

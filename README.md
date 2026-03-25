@@ -291,10 +291,14 @@ works:
 
 Your package's `.gitignore` file is also used by `watch` to decide which files
 to ignore. If you don't have a `.gitignore` file in your package, then the
-default `.gitignore` that `create` makes is used instead. The `.git/` directory
-and `.gitignore` file are both also ignored by `watch` (note: don't add them to
-your `.gitignore`). The following directories are always ignored by `watch`: 
-`.git`, `__pycache__`, `.mypy_cache`, `.venv`, `.history`, `build`.
+default `.gitignore` that `create` makes is used instead. You can also add a
+`.dawatchignore` file in the package root for watch-only ignore rules
+that you do not want to place in `.gitignore`; it uses the same gitignore-style
+patterns. For example, putting `tests/` in `.dawatchignore` will stop
+test files from triggering installs. The `.git/` directory, `.gitignore`, and
+`.dawatchignore` are all ignored by `watch` themselves. The following
+directories are always ignored by `watch`: `.git`, `__pycache__`, `.mypy_cache`,
+`.venv`, `.history`, `build`.
 
 If you have a `directory` key for the server in your `.docassemblecli` config
 file, it will cause that server to be used if no `server` is provided and the

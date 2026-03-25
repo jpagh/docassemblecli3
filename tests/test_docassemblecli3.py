@@ -47,9 +47,12 @@ class DummyResponse:
 def reset_globals(monkeypatch):
     monkeypatch.setattr(mod, "BELL", "\a")
     monkeypatch.setattr(mod, "DEBUG", False)
+    monkeypatch.setattr(mod, "WATCH_IGNORE_MTIME", None)
     monkeypatch.setattr(mod, "FILE_CHECKSUMS", {})
     monkeypatch.setattr(mod, "FULL_INSTALL_DONE", False)
     monkeypatch.setattr(mod, "GITMATCH_COMPILED", None)
+    monkeypatch.setattr(mod, "GITMATCH_DIRECTORY", None)
+    monkeypatch.setattr(mod, "GITIGNORE_MTIME", None)
     monkeypatch.setattr(mod, "LAST_MODIFIED", {"time": 0, "files": {}, "restart": False})
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0.6)
     mod.CONTEXT_SETTINGS["color"] = None
@@ -544,6 +547,41 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     default_ignored.parent.mkdir()
     default_ignored.write_text("artifact", encoding="utf-8")
     assert bool(mod.matches_ignore_patterns(str(default_ignored), str(no_gitignore_dir))) is True
+    coverage_file = no_gitignore_dir / ".coverage.hostname.pid123"
+    coverage_file.write_text("data", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(coverage_file), str(no_gitignore_dir))) is True
+
+    mod.GITMATCH_COMPILED = None
+    gitignore_dir = tmp_path / "reloadable"
+    gitignore_dir.mkdir()
+    switched_file = gitignore_dir / "switch.txt"
+    switched_file.write_text("value", encoding="utf-8")
+    (gitignore_dir / ".gitignore").write_text("", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(switched_file), str(gitignore_dir))) is False
+    (gitignore_dir / ".gitignore").write_text("switch.txt\n", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(switched_file), str(gitignore_dir))) is True
+
+    mod.GITMATCH_COMPILED = None
+    watchignore_dir = tmp_path / "watchignore"
+    watchignore_dir.mkdir()
+    watched_test_file = watchignore_dir / "tests" / "example_test.py"
+    watched_test_file.parent.mkdir(parents=True)
+    watched_test_file.write_text("print('watch')\n", encoding="utf-8")
+    (watchignore_dir / mod.WATCH_IGNORE_FILE).write_text("tests/\n", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(watched_test_file), str(watchignore_dir))) is True
+
+    kept_test_file = watchignore_dir / "tests" / "keep.py"
+    kept_test_file.write_text("print('keep')\n", encoding="utf-8")
+    (watchignore_dir / mod.WATCH_IGNORE_FILE).write_text("tests/*.py\n!tests/keep.py\n", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(watched_test_file), str(watchignore_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(kept_test_file), str(watchignore_dir))) is False
+
+    changed_watchignore_file = watchignore_dir / "questions" / "main.yml"
+    changed_watchignore_file.parent.mkdir(parents=True, exist_ok=True)
+    changed_watchignore_file.write_text("---\n", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(changed_watchignore_file), str(watchignore_dir))) is False
+    (watchignore_dir / mod.WATCH_IGNORE_FILE).write_text("tests/\nquestions/\n", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(changed_watchignore_file), str(watchignore_dir))) is True
 
     monkeypatch.setattr(mod, "calculate_checksum", lambda path: f"checksum:{os.path.basename(path)}")
     mod.GITMATCH_COMPILED = None
@@ -1056,6 +1094,62 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
     assert upload_calls[0]["playground"] == "stored-playground"
 
 
+def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "select_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+
+    package_calls = []
+    upload_calls = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
+    monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+
+    mod.FULL_INSTALL_DONE = True
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert package_calls == []
+    assert upload_calls[0]["playground"] == "stored-playground"
+    assert "Installed.\a" in capsys.readouterr().out
+
+
 def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -1097,6 +1191,13 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert installs[0]["restart"] == "no"
+
+
+def test_calculate_checksum_missing_file_is_quiet(capsys, tmp_path):
+    missing_file = tmp_path / ".coverage.hostname.pid123"
+
+    assert mod.calculate_checksum(str(missing_file)) == ""
+    assert capsys.readouterr().out == ""
 
 
 def test_create_without_license_omits_project_license(tmp_path, monkeypatch):
