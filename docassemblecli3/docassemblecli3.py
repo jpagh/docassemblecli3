@@ -1282,6 +1282,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
 
     click.echo(f"""Watching: {directory}""")
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
+    stop_message = """\nStopping "docassemblecli3 watch"."""
     try:
         while True:
             if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
@@ -1321,13 +1322,15 @@ def watch(directory, config, api, server, playground, restart, buffer):
                     )
                 FULL_INSTALL_DONE = install_result == 0
             time.sleep(1)
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
         click.echo(f"\nException occurred: {e}")
     finally:
         observer.stop()
         observer.join()
         FULL_INSTALL_DONE = False
-        return """\nStopping "docassemblecli3 watch"."""
+    return stop_message
 
 
 # =============================================================================
