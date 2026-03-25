@@ -1,39 +1,68 @@
-[build-system]
-build-backend = "setuptools.build_meta"
-requires = ["setuptools>=64"]
-
 [project]
-authors = [
-    { email = "jackadamson@gmail.com", name = "Jack Adamson" },
-    { email = "jhpyle@gmail.com", name = "Jonathan Pyle" },
-]
-classifiers = [
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python",
-]
-dependencies = [
-    "PyYAML",
-    "click",
-    "gitmatch",
-    "packaging",
-    "requests",
-    "watchdog",
-]
-description = "Multi-platform CLI utility for working with docassemble packages and servers"
-keywords = ["docassemble"]
-license = { file = "LICENSE" }
-name = "docassemblecli3"
-readme = "README.md"
-requires-python = ">= 3.10"
-version = "0.5.1"
+    authors = [
+        { email = "jackadamson@gmail.com", name = "Jack Adamson" },
+        { email = "jhpyle@gmail.com", name = "Jonathan Pyle" },
+    ]
+    classifiers = [
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python",
+    ]
+    dependencies = [
+        "click>=8.3.1",
+        "gitmatch>=0.3.0",
+        "packaging>=26.0",
+        "requests>=2.32.5",
+        "watchdog>=6.0.0",
+    ]
+    description = "Multi-platform CLI utility for working with docassemble packages and servers"
+    keywords = [
+        "docassemble",
+    ]
+    license = { file = "LICENSE" }
+    name = "docassemblecli3"
+    readme = "README.md"
+    requires-python = ">= 3.10"
+    version = "0.5.1"
 
-[project.urls]
-"Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
-"Homepage" = "https://github.com/jpagh/docassemblecli3"
+    [project.urls]
+        "Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
+        "Homepage"    = "https://github.com/jpagh/docassemblecli3"
 
-[project.scripts]
-da = "docassemblecli3:cli"
-docassemblecli3 = "docassemblecli3:cli"
+    [project.scripts]
+        da              = "docassemblecli3:cli"
+        docassemblecli3 = "docassemblecli3:cli"
+
+[build-system]
+    build-backend = "setuptools.build_meta"
+    requires = [
+        "setuptools>=64",
+    ]
+
+[tool.coverage.run]
+    branch = true
+    omit = [
+        "tests/*",
+    ]
+    relative_files = true
+    source = [
+        "docassemblecli3",
+    ]
+
+[tool.coverage.report]
+    omit = [
+        "tests/*",
+    ]
 
 [tool.ruff]
-line-length = 120
+    line-length = 120
+
+[tool.pytest.ini_options]
+    addopts = "--cov=docassemblecli3 --cov-branch --cov-report=term-missing --cov-fail-under=100"
+
+
+[dependency-groups]
+    dev = [
+        "pytest-cov>=7.1.0",
+        "pytest-xdist>=3.8.0",
+        "pytest>=9.0.2",
+    ]
