@@ -1,3 +1,4 @@
+import configparser
 import datetime
 import hashlib
 import os
@@ -18,6 +19,7 @@ import yaml
 from packaging import version as packaging_version
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+import tomllib
 
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
@@ -28,6 +30,9 @@ LAST_MODIFIED = {
     "files": {},
     "restart": False,
 }
+
+global FULL_INSTALL_DONE
+FULL_INSTALL_DONE = False
 
 global FILE_CHECKSUMS
 FILE_CHECKSUMS = {}
@@ -43,6 +48,9 @@ EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history
 
 global GITMATCH_COMPILED
 GITMATCH_COMPILED = None
+
+global WATCH_SETTLE_DELAY
+WATCH_SETTLE_DELAY = 0.6
 
 global GITIGNORE
 GITIGNORE = """\
@@ -67,6 +75,9 @@ en
 .dir-locals.el
 .flake8
 *.swp
+*.swx
+*.tmp
+*.tmp.*
 .DS_Store
 .envrc
 .env
@@ -206,6 +217,25 @@ def common_params_for_installation(func):
     return wrapper
 
 
+def common_params_for_runtime_config(func):
+    @click.option(
+        "--config",
+        "-c",
+        is_flag=False,
+        flag_value="",
+        default=DEFAULT_CONFIG,
+        type=click.Path(),
+        callback=validate_and_load_or_create_config,
+        show_default=True,
+        help="Specify the config file to use or leave it blank to skip using any config file",
+    )
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
 def common_params_for_directory_and_playground(func):
     @click.option(
         "--directory",
@@ -241,13 +271,159 @@ class APIURLType(click.ParamType):
             self.fail(f""""{value}" is not a valid URL""", param, ctx)
 
 
+def package_metadata_files_present(directory: str) -> bool:
+    return any(
+        os.path.isfile(os.path.join(directory, filename)) for filename in ("setup.py", "setup.cfg", "pyproject.toml")
+    )
+
+
+def parse_dependency_strings(dependency_strings) -> dict:
+    dependencies = {}
+    for dependency_string in dependency_strings:
+        if not isinstance(dependency_string, str):
+            continue
+        dependency_string = dependency_string.strip().rstrip(",")
+        if not dependency_string or dependency_string.startswith("#"):
+            continue
+        dependency_string = dependency_string.split(";", 1)[0].strip()
+        mm = re.search(r"""(.*?)(<=|>=|==|<|>)(.*)""", dependency_string)
+        if mm:
+            dependencies[mm.group(1).strip()] = {
+                "installed": False,
+                "operator": mm.group(2),
+                "version": mm.group(3).strip(),
+            }
+        else:
+            dependencies[dependency_string] = {"installed": False, "operator": None, "version": None}
+    return dependencies
+
+
+def load_package_metadata(directory: str, files: list[str]) -> tuple[str | None, dict]:
+    this_package_name = None
+    dependencies = {}
+
+    if "pyproject.toml" in files:
+        with open(os.path.join(directory, "pyproject.toml"), "rb") as fp:
+            data = tomllib.load(fp)
+        project = data.get("project", {})
+        if isinstance(project, dict):
+            if isinstance(project.get("name"), str):
+                this_package_name = project["name"].strip()
+            dependencies.update(parse_dependency_strings(project.get("dependencies", [])))
+
+    if "setup.cfg" in files:
+        parser = configparser.ConfigParser()
+        parser.read(os.path.join(directory, "setup.cfg"), encoding="utf-8")
+        if not this_package_name and parser.has_option("metadata", "name"):
+            this_package_name = parser.get("metadata", "name").strip()
+        if parser.has_option("options", "install_requires"):
+            dependencies.update(parse_dependency_strings(parser.get("options", "install_requires").splitlines()))
+
+    if "setup.py" in files:
+        with open(os.path.join(directory, "setup.py"), "r", encoding="utf-8") as fp:
+            setup_text = fp.read()
+        if not this_package_name:
+            m = re.search(r"""setup\(.*\bname=(["\'])(.*?)(["\'])""", setup_text)
+            if m and m.group(1) == m.group(3):
+                this_package_name = m.group(2).strip()
+        m = re.search(r"""setup\(.*install_requires=\[(.*?)\]""", setup_text, flags=re.DOTALL)
+        if m:
+            package_texts = [package_text.strip() for package_text in m.group(1).split(",")]
+            install_requires = []
+            for package_name in package_texts:
+                if len(package_name) >= 3 and package_name[0] == package_name[-1] and package_name[0] in ("'", '"'):
+                    install_requires.append(package_name[1:-1])
+            dependencies.update(parse_dependency_strings(install_requires))
+
+    return this_package_name, dependencies
+
+
+def normalize_package_name(package: str) -> str:
+    package_name = re.sub(r"^docassemble-", "docassemble.", package)
+    if not package_name.startswith("docassemble."):
+        package_name = "docassemble." + package_name
+    return package_name
+
+
+def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
+    deduplicated = {}
+    for file_path, event_types in file_events.items():
+        if "created" in event_types:
+            deduplicated[file_path] = "created"
+        elif "modified" in event_types:
+            deduplicated[file_path] = "modified"
+        elif "deleted" in event_types:
+            deduplicated[file_path] = "deleted"
+    return deduplicated
+
+
+def classify_playground_paths(changed_files: dict[str, str]) -> dict[str, list[str]] | None:
+    uploads = {"questions": [], "sources": [], "static": [], "templates": [], "modules": []}
+    for file_path, event_type in changed_files.items():
+        normalized_path = "/".join(os.path.normpath(file_path).split(os.sep))
+        if event_type == "deleted":
+            if normalized_path.endswith(".py"):
+                return None
+            continue
+        match = re.search(r"/docassemble/([^/]+)/data/([^/]+)/", normalized_path)
+        if match and match.group(2) in uploads and match.group(2) != "modules":
+            uploads[match.group(2)].append(file_path)
+            continue
+        match = re.search(r"/docassemble/([^/]+)/([^/]+)\.py$", normalized_path)
+        if match:
+            uploads["modules"].append(file_path)
+            continue
+        return None
+    return uploads
+
+
+def upload_playground_files(apiurl: str, apikey: str, playground: str, changed_files: dict[str, str]) -> bool:
+    uploads = classify_playground_paths(changed_files)
+    if uploads is None:
+        return False
+
+    for folder in ("questions", "sources", "static", "templates", "modules"):
+        files_to_upload = uploads[folder]
+        if not files_to_upload:
+            continue
+        for index, file_path in enumerate(files_to_upload):
+            click.echo(f"Uploading {file_path} to {folder}")
+            post_data = {
+                "folder": folder,
+                "restart": "1" if folder == "modules" and index == len(files_to_upload) - 1 else "0",
+            }
+            if playground and playground != "default":
+                post_data["project"] = playground
+            try:
+                with open(file_path, "rb") as fp:
+                    response = requests.post(
+                        apiurl + "/api/playground",
+                        data=post_data,
+                        files={"file": fp},
+                        headers={"X-API-Key": apikey},
+                        timeout=600,
+                    )
+            except FileNotFoundError:
+                continue
+            except Exception as err:
+                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                raise click.ClickException(f"""{err}\n""")
+            if response.status_code == 200:
+                info = response.json()
+                if not wait_for_server(True, info["task_id"], apikey, apiurl):
+                    return False
+            elif response.status_code != 204:
+                return False
+    return True
+
+
 def validate_package_directory(ctx, param, directory: str) -> str:
     directory = os.path.abspath(directory)
     if not os.path.exists(directory):
         raise click.BadParameter(f"""Directory "{directory}" does not exist.""")
-    if not os.path.isfile(os.path.join(directory, "setup.py")):
+    if not package_metadata_files_present(directory):
         raise click.BadParameter(
-            f"""Directory "{directory}" does not contain a setup.py file, so it is not the directory of a valid Python package."""
+            f"""Directory "{directory}" does not contain a setup.py, setup.cfg, or pyproject.toml file, so it is not the directory of a valid Python package."""
         )
     else:
         return directory
@@ -430,6 +606,7 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
         playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"
     ):
         tries = 0
+        info = {}
         before_wait_for_server = time.time()
         while tries < 300:
             if playground:
@@ -439,7 +616,9 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
             try:
                 r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
             except requests.exceptions.RequestException:
-                pass
+                time.sleep(1)
+                tries += 1
+                continue
             if r.status_code != 200:
                 return "package_update_status returned " + str(r.status_code) + ": " + r.text
             info = r.json()
@@ -555,33 +734,9 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             and not d.endswith(".egg-info")
             and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
         ]
-        if root_directory is None and ("setup.py" in files or "setup.cfg" in files):
+        if root_directory is None and package_metadata_files_present(root):
             root_directory = root
-            if "setup.py" in files:
-                with open(os.path.join(root, "setup.py"), "r", encoding="utf-8") as fp:
-                    setup_text = fp.read()
-                    m = re.search(r"""setup\(.*\bname=(["\"])(.*?)(["\"])""", setup_text)
-                    if m and m.group(1) == m.group(3):
-                        this_package_name = m.group(2).strip()
-                    m = re.search(r"""setup\(.*install_requires=\[(.*?)\]""", setup_text, flags=re.DOTALL)
-                    if m:
-                        for package_text in m.group(1).split(","):
-                            package_name = package_text.strip()
-                            if (
-                                len(package_name) >= 3
-                                and package_name[0] == package_name[-1]
-                                and package_name[0] in (""", """)
-                            ):
-                                package_name = package_name[1:-1]
-                                mm = re.search(r"""(.*)(<=|>=|==|<|>)(.*)""", package_name)
-                                if mm:
-                                    dependencies[mm.group(1).strip()] = {
-                                        "installed": False,
-                                        "operator": mm.group(2),
-                                        "version": mm.group(3).strip(),
-                                    }
-                                else:
-                                    dependencies[package_name] = {"installed": False, "operator": None, "version": None}
+            this_package_name, dependencies = load_package_metadata(root, files)
         for the_file in files:
             if (
                 the_file.endswith("~")
@@ -589,6 +744,9 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 or the_file.endswith(".swp")
                 or the_file.startswith("#")
                 or the_file.startswith(".#")
+                or the_file.endswith(".tmp")
+                or ".tmp." in the_file
+                or the_file.endswith(".swx")
                 or (the_file == ".gitignore" and root_directory == root)
                 or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
             ):
@@ -596,7 +754,7 @@ def package_installer(directory, apiurl, apikey, playground, restart):
             if (
                 not has_python_files
                 and the_file.endswith(".py")
-                and not (the_file == "setup.py" and root == root_directory)
+                and not (the_file in ("setup.py", "setup.cfg", "pyproject.toml") and root == root_directory)
                 and the_file != "__init__.py"
             ):
                 has_python_files = True
@@ -826,14 +984,135 @@ def install(directory, config, api, server, playground, restart):
     else:
         click.echo(f"""Location: Playground "{playground}" """)
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
-    package_installer(
+    return package_installer(
         directory=directory,
         apiurl=selected_server["apiurl"],
         apikey=selected_server["apikey"],
         playground=playground,
         restart=restart,
     )
+
+
+@cli.command(context_settings=CONTEXT_SETTINGS)
+@common_params_for_api
+@common_params_for_runtime_config
+@click.option(
+    "--playground",
+    "-p",
+    metavar="(PROJECT)",
+    is_flag=False,
+    flag_value="default",
+    help="Download from the default Playground or from the specified Playground project.",
+)
+@click.option("--overwrite/--no-overwrite", default=False, show_default=True, help="Overwrite existing files.")
+@click.argument("package")
+def download(config, api, server, playground, overwrite, package):
+    """
+    Download a docassemble package from a docassemble server or Playground.
+    """
+    selected_server = select_server(*config, *api, server)
+    package_name = normalize_package_name(package)
+    package_file_name = re.sub(r"docassemble\.", "docassemble-", package_name)
+    archive = tempfile.NamedTemporaryFile(suffix=".zip")
+
+    try:
+        if playground:
+            params = {"folder": "packages", "filename": package_name}
+            if playground != "default":
+                params["project"] = playground
+            response = requests.get(
+                selected_server["apiurl"] + "/api/playground",
+                params=params,
+                stream=True,
+                timeout=600,
+                headers={"X-API-Key": selected_server["apikey"]},
+            )
+            if response.status_code == 404:
+                return "Package not found."
+            response.raise_for_status()
+        else:
+            response = requests.get(
+                selected_server["apiurl"] + "/api/package",
+                headers={"X-API-Key": selected_server["apikey"]},
+                timeout=600,
+            )
+            if response.status_code != 200:
+                return "Unable to connect to server."
+            zip_file_number = None
+            for item in response.json():
+                if item["name"] == package_name:
+                    zip_file_number = item.get("zip_file_number")
+                    break
+            if zip_file_number is None:
+                return "Package installed but is not downloadable."
+            response = requests.get(
+                selected_server["apiurl"] + "/api/file/" + str(zip_file_number),
+                stream=True,
+                timeout=600,
+                headers={"X-API-Key": selected_server["apikey"]},
+            )
+            response.raise_for_status()
+    except requests.exceptions.HTTPError as err:
+        return "Error downloading package: " + str(err)
+    except Exception as err:
+        click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+        raise click.ClickException(f"""{err}\n""")
+
+    with open(archive.name, "wb") as fp:
+        for chunk in response.iter_content(8192):
+            fp.write(chunk)
+
+    with zipfile.ZipFile(archive.name, mode="r") as zf:
+        if not overwrite:
+            for file_info in zf.infolist():
+                if os.path.exists(file_info.filename):
+                    return (
+                        "Unpacking the package here would overwrite existing files "
+                        + f"({file_info.filename}). Use --overwrite if you want to overwrite existing files."
+                    )
+        zf.extractall(path=os.getcwd())
+    click.echo(f"Unpacked {package_file_name}.")
     return 0
+
+
+@cli.command(context_settings=CONTEXT_SETTINGS)
+@common_params_for_api
+@common_params_for_runtime_config
+@click.option(
+    "--restart/--no-restart",
+    default=True,
+    show_default=True,
+    help="Restart the docassemble server after uninstalling the package.",
+)
+@click.argument("package")
+def uninstall(config, api, server, restart, package):
+    """
+    Uninstall a docassemble package from a docassemble server.
+    """
+    selected_server = select_server(*config, *api, server)
+    package_name = normalize_package_name(package)
+    data = {"package": package_name}
+    if not restart:
+        data["restart"] = "0"
+
+    try:
+        response = requests.delete(
+            selected_server["apiurl"] + "/api/package",
+            params=data,
+            headers={"X-API-Key": selected_server["apikey"]},
+            timeout=600,
+        )
+    except Exception as err:
+        click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+        raise click.ClickException(f"""{err}\n""")
+    if response.status_code != 200:
+        return "package DELETE returned " + str(response.status_code) + ": " + response.text
+
+    info = response.json()
+    if wait_for_server(False, info["task_id"], selected_server["apikey"], selected_server["apiurl"]):
+        click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Uninstalled.{BELL}""", fg="green")
+        return 0
+    return 1
 
 
 # -----------------------------------------------------------------------------
@@ -892,19 +1171,35 @@ class WatchHandler(FileSystemEventHandler):
 
     def on_any_event(self, event):
         global LAST_MODIFIED, FILE_CHECKSUMS
+        event_type = getattr(event, "event_type", None)
+        if event_type in ("opened", "closed") or (event.is_directory and event_type == "modified"):
+            return None
         if event.is_directory:
             return None
-        if event.event_type == "created" or event.event_type == "modified":
-            if not matches_ignore_patterns(path=event.src_path.replace("\\", "/"), directory=self.directory):
-                new_checksum = calculate_checksum(event.src_path)
-                if event.src_path not in FILE_CHECKSUMS or (
-                    new_checksum and FILE_CHECKSUMS[event.src_path] != new_checksum
-                ):
-                    FILE_CHECKSUMS[event.src_path] = new_checksum
-                    LAST_MODIFIED["time"] = time.time()
-                    LAST_MODIFIED["files"][str(event.src_path)] = True
-                    if str(event.src_path).endswith(".py"):
-                        LAST_MODIFIED["restart"] = True
+        event_path = os.path.abspath(event.src_path)
+        if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
+            return None
+        if event_type in ("created", "modified"):
+            new_checksum = calculate_checksum(event_path)
+            if not new_checksum or FILE_CHECKSUMS.get(event_path) == new_checksum:
+                return None
+            FILE_CHECKSUMS[event_path] = new_checksum
+        elif event_type == "deleted":
+            FILE_CHECKSUMS.pop(event_path, None)
+        else:
+            return None
+
+        event_bucket = LAST_MODIFIED["files"].setdefault(event_path, {})
+        if event_type == "deleted":
+            LAST_MODIFIED["files"][event_path] = {"deleted": True}
+        else:
+            if "deleted" in event_bucket:
+                event_bucket = {}
+            event_bucket[event_type] = True
+            LAST_MODIFIED["files"][event_path] = event_bucket
+        LAST_MODIFIED["time"] = time.time()
+        if event_path.endswith(".py"):
+            LAST_MODIFIED["restart"] = True
 
 
 # =============================================================================
@@ -940,7 +1235,7 @@ def watch(directory, config, api, server, playground, restart, buffer):
     selected_server = select_server(*config, *api, server, directory=directory)
     restart_param = restart
     scan_directory(directory)
-    global LAST_MODIFIED
+    global FULL_INSTALL_DONE, LAST_MODIFIED
     event_handler = WatchHandler(directory=directory)
     observer = Observer()
     observer.schedule(event_handler, directory, recursive=True)
@@ -962,44 +1257,63 @@ def watch(directory, config, api, server, playground, restart, buffer):
 
     if "startup" in selected_server and selected_server["startup"] == "install":
         click.secho("""Installing on startup.""", fg="cyan")
-        package_installer(
+        startup_result = package_installer(
             directory=directory,
             apiurl=selected_server["apiurl"],
             apikey=selected_server["apikey"],
             playground=playground,
             restart=restart,
         )
+        FULL_INSTALL_DONE = startup_result == 0
         click.echo("")
 
     click.echo(f"""Watching: {directory}""")
     click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
     try:
         while True:
-            if LAST_MODIFIED["time"]:
+            if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
+                changed_files = deduplicate_watch_events(LAST_MODIFIED["files"])
+                if not changed_files:
+                    LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
+                    time.sleep(0.2)
+                    continue
                 click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
                 if restart_param == "yes" or (restart_param == "auto" and LAST_MODIFIED["restart"]):
-                    restart = "yes"
+                    effective_restart = "yes"
                     time.sleep(buffer)
                 else:
-                    restart = "no"
-                for item in LAST_MODIFIED["files"].keys():
+                    effective_restart = "no"
+                for item in changed_files.keys():
                     click.echo("  " + item.replace(directory, ""))
-                LAST_MODIFIED["time"] = 0
-                LAST_MODIFIED["files"] = {}
-                LAST_MODIFIED["restart"] = False
-                package_installer(
-                    directory=directory,
-                    apiurl=selected_server["apiurl"],
-                    apikey=selected_server["apikey"],
-                    playground=playground,
-                    restart=restart,
-                )
+                LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
+
+                install_result = None
+                if playground and FULL_INSTALL_DONE:
+                    uploaded = upload_playground_files(
+                        apiurl=selected_server["apiurl"],
+                        apikey=selected_server["apikey"],
+                        playground=playground,
+                        changed_files=changed_files,
+                    )
+                    if uploaded:
+                        install_result = 0
+
+                if install_result is None:
+                    install_result = package_installer(
+                        directory=directory,
+                        apiurl=selected_server["apiurl"],
+                        apikey=selected_server["apikey"],
+                        playground=playground,
+                        restart=effective_restart,
+                    )
+                FULL_INSTALL_DONE = install_result == 0
             time.sleep(1)
     except Exception as e:
         click.echo(f"\nException occurred: {e}")
     finally:
         observer.stop()
         observer.join()
+        FULL_INSTALL_DONE = False
         return """\nStopping "docassemblecli3 watch"."""
 
 
@@ -1036,7 +1350,7 @@ def create(package, developer_name, developer_email, description, url, license, 
         if not os.path.isdir(packagedir):
             return "Cannot create the directory " + packagedir + " because the path already exists."
         dir_listing = list(os.listdir(packagedir))
-        if "setup.py" in dir_listing or "setup.cfg" in dir_listing:
+        if "setup.py" in dir_listing or "setup.cfg" in dir_listing or "pyproject.toml" in dir_listing:
             return "The directory " + packagedir + " already has a package in it."
     else:
         os.makedirs(packagedir, exist_ok=True)
@@ -1106,13 +1420,56 @@ SOFTWARE.
         + developer_email
         + "\n"
     )
-    manifestin = """\
+    manifestin = (
+        """\
 include README.md
+graft docassemble/"""
+        + pkgname
+        + """/data
+recursive-exclude * *.egg-info
+recursive-exclude .git *
+recursive-exclude venv *
+recursive-exclude .github *
+recursive-exclude .pytest_cache *
+recursive-exclude .vscode *
+recursive-exclude build *
+recursive-exclude dist *
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc
+recursive-exclude * *.pyo
+recursive-exclude * *.orig
+recursive-exclude * *~
+recursive-exclude * *.bak
+recursive-exclude * *.swp
 """
+    )
     setupcfg = """\
 [metadata]
 description_file = README.md
 """
+    pyproject = f"""[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docassemble.{pkgname}"
+version = "{version}"
+description = {repr(description)}
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {{ name = {repr(developer_name)}, email = {repr(developer_email)} }},
+]
+dependencies = []
+
+[project.urls]
+Homepage = {repr(package_url)}
+
+[tool.setuptools.packages.find]
+where = ["."]
+"""
+    if license:
+        pyproject += f"\n[project.license]\ntext = {repr(license)}\n"
     setuppy = """\
 import os
 import sys
@@ -1223,6 +1580,8 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
         the_file.write(setupcfg)
     with open(os.path.join(packagedir, "MANIFEST.in"), "w", encoding="utf-8") as the_file:
         the_file.write(manifestin)
+    with open(os.path.join(packagedir, "pyproject.toml"), "w", encoding="utf-8") as the_file:
+        the_file.write(pyproject)
     with open(os.path.join(packagedir, "docassemble", "__init__.py"), "w", encoding="utf-8") as the_file:
         the_file.write(initpy)
     with open(os.path.join(packagedir, "docassemble", pkgname, "__init__.py"), "w", encoding="utf-8") as the_file:

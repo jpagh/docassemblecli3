@@ -22,15 +22,24 @@ released under the MIT License.
 
 ## Prerequisites
 
-This program should only require that you have Python 3.10 installed on your
-computer, but it was developed and tested with Python 3.13. Please report any
-bugs or errors you experience.
+This program requires Python 3.12 or newer on your computer. It was developed
+and tested with Python 3.13. Use `uv` for local project management and command
+execution.
 
 ## Installation
 
-To install `docassemblecli3` from PyPI, run:
+To install `docassemblecli3` as a tool with `uv`, run:
 
-    pip install docassemblecli3
+    uv tool install docassemblecli3
+
+To work on the project locally, create or update the environment with:
+
+    uv sync
+
+Run commands in the project environment with `uv run`, for example:
+
+    uv run pytest -q
+    uv run python -m docassemblecli3 --help
 
 ## Usage
 
@@ -54,7 +63,9 @@ but feel free to use whichever you prefer.
     Commands:
     config   Manage servers in a docassemblecli config file.
     create   Create an empty docassemble add-on package.
+    download Download a docassemble package from a docassemble server or Playground.
     install  Install a docassemble package on a docassemble server.
+    uninstall Uninstall a docassemble package from a docassemble server.
     watch    Watch a package directory and `install` any changes.
 
 ### create
@@ -67,8 +78,8 @@ To create a package called `docassemble-foobar` in the current directory, run:
     da create --package foobar
 
 You will be asked some questions about the package and the developer. This
-information is necessary because it goes into the `setup.py`, `README.md`, and
-`LICENSE` files of the package. If you do not yet know what answers to give,
+information is necessary because it goes into the `pyproject.toml`, `setup.py`,
+`README.md`, and `LICENSE` files of the package. If you do not yet know what answers to give,
 just press enter, and you can edit these files later.
 
 When the command exits, you will find a directory in the current directory
@@ -103,7 +114,7 @@ For example, suppose that you wrote a docassemble extension package called
 you can download the package as a ZIP file called `docassemble-foobar.zip`. You
 can then unpack this ZIP file and you will see a directory called
 `docassemble-foobar`. Inside of this directory there is a directory called
-`docassemble` and a `setup.py` file.
+`docassemble` and package metadata such as `setup.py`, `setup.cfg`, or `pyproject.toml`.
 
 From the command line, use `cd` to navigate into the directory
 `docassemble-foobar`. Then run:
@@ -203,6 +214,23 @@ the project after the `--playground` option, for example project "testing".
 
 Installing into the Playground with `--playground` is faster than installing an
 actual Python package because it does not need to run `pip`.
+
+### download
+
+Use `download` to fetch an installed package from the server or from a Playground project.
+
+Examples:
+
+    da download docassemble.foobar
+    da download --playground testing docassemble.foobar
+
+### uninstall
+
+Use `uninstall` to remove a package from the server.
+
+Example:
+
+    da uninstall docassemble.foobar
 
 If your development installation uses more than one server, it is safe to run
 `da install --playground` with `--restart no` if you are only changing YAML files,

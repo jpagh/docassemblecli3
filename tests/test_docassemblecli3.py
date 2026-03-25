@@ -17,12 +17,13 @@ import docassemblecli3.docassemblecli3 as mod
 
 
 class DummyResponse:
-    def __init__(self, status_code=200, text="", json_data=None, contains=None, raise_error=None):
+    def __init__(self, status_code=200, text="", json_data=None, contains=None, raise_error=None, chunks=None):
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
         self._contains = contains or []
         self._raise_error = raise_error
+        self._chunks = chunks or [b""]
 
     def json(self):
         if isinstance(self._json_data, Exception):
@@ -35,6 +36,9 @@ class DummyResponse:
         if self.status_code >= 400:
             raise requests.HTTPError(self.text or str(self.status_code))
 
+    def iter_content(self, _chunk_size):
+        yield from self._chunks
+
     def __contains__(self, item):
         return item in self._contains
 
@@ -44,8 +48,10 @@ def reset_globals(monkeypatch):
     monkeypatch.setattr(mod, "BELL", "\a")
     monkeypatch.setattr(mod, "DEBUG", False)
     monkeypatch.setattr(mod, "FILE_CHECKSUMS", {})
+    monkeypatch.setattr(mod, "FULL_INSTALL_DONE", False)
     monkeypatch.setattr(mod, "GITMATCH_COMPILED", None)
     monkeypatch.setattr(mod, "LAST_MODIFIED", {"time": 0, "files": {}, "restart": False})
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0.6)
     mod.CONTEXT_SETTINGS["color"] = None
 
 
@@ -92,6 +98,60 @@ def test_cli_callback_and_api_url_type():
         mod.APIURLType().convert("not a url", None, None)
 
 
+def test_metadata_helpers_and_dependency_parsing(tmp_path):
+    assert mod.package_metadata_files_present(str(tmp_path)) is False
+
+    deps = mod.parse_dependency_strings([None, "# comment", " dep>=1.0 ; python_version>='3.12' ", "plain,"])
+    assert deps == {
+        "dep": {"installed": False, "operator": ">=", "version": "1.0"},
+        "plain": {"installed": False, "operator": None, "version": None},
+    }
+
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.cfg").write_text(
+        "[metadata]\nname = docassemble.cfg\n[options]\ninstall_requires =\n dep_a>=1.0\n plain\n",
+        encoding="utf-8",
+    )
+    assert mod.package_metadata_files_present(str(package_dir)) is True
+    package_name, dependencies = mod.load_package_metadata(str(package_dir), ["setup.cfg"])
+    assert package_name == "docassemble.cfg"
+    assert dependencies["dep_a"]["operator"] == ">="
+    assert dependencies["plain"]["operator"] is None
+    assert mod.normalize_package_name("demo") == "docassemble.demo"
+    assert mod.normalize_package_name("docassemble-demo") == "docassemble.demo"
+
+    pyproject_dir = tmp_path / "pyproject-weird"
+    pyproject_dir.mkdir()
+    (pyproject_dir / "pyproject.toml").write_text("project = 'oops'\n", encoding="utf-8")
+    package_name, dependencies = mod.load_package_metadata(str(pyproject_dir), ["pyproject.toml"])
+    assert package_name is None
+    assert dependencies == {}
+
+    pyproject_no_name_dir = tmp_path / "pyproject-no-name"
+    pyproject_no_name_dir.mkdir()
+    (pyproject_no_name_dir / "pyproject.toml").write_text(
+        "[project]\ndependencies = ['dep_only>=1.0']\n",
+        encoding="utf-8",
+    )
+    package_name, dependencies = mod.load_package_metadata(str(pyproject_no_name_dir), ["pyproject.toml"])
+    assert package_name is None
+    assert dependencies["dep_only"]["version"] == "1.0"
+
+    combo_dir = tmp_path / "combo"
+    combo_dir.mkdir()
+    (combo_dir / "pyproject.toml").write_text("[project]\nname='docassemble.combo'\n", encoding="utf-8")
+    (combo_dir / "setup.cfg").write_text("[options]\ninstall_requires =\n dep_b==2.0\n", encoding="utf-8")
+    (combo_dir / "setup.py").write_text(
+        'from setuptools import setup\nsetup(name="ignored", install_requires=["dep_c>=3.0"])\n',
+        encoding="utf-8",
+    )
+    package_name, dependencies = mod.load_package_metadata(str(combo_dir), ["pyproject.toml", "setup.cfg", "setup.py"])
+    assert package_name == "docassemble.combo"
+    assert dependencies["dep_b"]["version"] == "2.0"
+    assert dependencies["dep_c"]["version"] == "3.0"
+
+
 def test_validate_package_directory_and_config(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -106,6 +166,16 @@ def test_validate_package_directory_and_config(tmp_path, monkeypatch):
     invalid_dir.mkdir()
     with pytest.raises(click.BadParameter):
         mod.validate_package_directory(None, None, str(invalid_dir))
+
+    setup_cfg_dir = tmp_path / "setup-cfg"
+    setup_cfg_dir.mkdir()
+    (setup_cfg_dir / "setup.cfg").write_text("[metadata]\nname = docassemble.test\n", encoding="utf-8")
+    assert mod.validate_package_directory(None, None, str(setup_cfg_dir)) == str(setup_cfg_dir.resolve())
+
+    pyproject_dir = tmp_path / "pyproject"
+    pyproject_dir.mkdir()
+    (pyproject_dir / "pyproject.toml").write_text("[project]\nname='docassemble.test'\n", encoding="utf-8")
+    assert mod.validate_package_directory(None, None, str(pyproject_dir)) == str(pyproject_dir.resolve())
 
     assert mod.validate_and_load_or_create_config(None, None, "") == (None, [])
 
@@ -275,8 +345,53 @@ def test_wait_for_server_success_and_errors(monkeypatch):
         "get",
         lambda *args, **kwargs: (_ for _ in ()).throw(requests.exceptions.RequestException("timeout")),
     )
-    with pytest.raises(UnboundLocalError):
-        mod.wait_for_server(False, "task-4", "key", "https://example.com", "1.5.3")
+    assert mod.wait_for_server(False, "task-4", "key", "https://example.com", "1.5.3") is False
+
+
+def test_wait_for_server_reraises_thread_exception(monkeypatch):
+    monkeypatch.setattr(mod.time, "time", lambda: 1)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("boom")))
+    with pytest.raises(ValueError):
+        mod.wait_for_server(False, "task", "key", "https://example.com", "1.5.3")
+
+
+def test_package_installer_reads_pyproject_metadata(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "pyproject.toml").write_text(
+        "[project]\nname = 'docassemble.test'\ndependencies = ['dep>=1.0']\n",
+        encoding="utf-8",
+    )
+    (package_dir / "docassemble" / "test" / "data" / "questions").mkdir(parents=True)
+    (package_dir / "docassemble" / "test" / "data" / "questions" / "interview.yml").write_text(
+        "---\n", encoding="utf-8"
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(
+        mod.requests,
+        "get",
+        lambda *args, **kwargs: DummyResponse(
+            status_code=200,
+            json_data=[
+                {"name": "dep", "version": "1.2"},
+                {"name": "docassemble.test", "version": "0.0.1"},
+            ],
+        ),
+    )
+    posts = iter([DummyResponse(status_code=200, json_data={"task_id": "task"}), DummyResponse(status_code=204)])
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: next(posts))
+    monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: True)
+
+    assert mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="auto") == 0
 
 
 def test_package_installer_restart_no_and_dependency_checks(tmp_path, monkeypatch):
@@ -444,12 +559,16 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     monkeypatch.setattr(mod.time, "time", lambda: 123)
     event = SimpleNamespace(is_directory=False, event_type="created", src_path=str(package_dir / "module.py"))
     handler.on_any_event(event)
-    assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: True}, "restart": True}
+    assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"created": True}}, "restart": True}
 
     mod.FILE_CHECKSUMS[event.src_path] = "checksum:module.py"
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
     handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=event.src_path))
     assert mod.LAST_MODIFIED == {"time": 0, "files": {}, "restart": False}
+
+    delete_event = SimpleNamespace(is_directory=False, event_type="deleted", src_path=event.src_path)
+    handler.on_any_event(delete_event)
+    assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"deleted": True}}, "restart": True}
 
 
 def test_watch_command(tmp_path, monkeypatch):
@@ -490,7 +609,8 @@ def test_watch_command(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
-    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): True}, "restart": True}
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": True}
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
 
     sleep_calls = {"count": 0}
 
@@ -510,6 +630,91 @@ def test_watch_command(tmp_path, monkeypatch):
     assert installs[1]["restart"] == "yes"
 
 
+def test_watch_helpers_and_incremental_playground_upload(tmp_path, monkeypatch):
+    questions_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "a.yml"
+    module_file = tmp_path / "docassemble" / "test" / "module.py"
+    deleted_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "deleted.yml"
+    questions_file.parent.mkdir(parents=True)
+    module_file.parent.mkdir(parents=True, exist_ok=True)
+    questions_file.write_text("---\n", encoding="utf-8")
+    module_file.write_text("value = 1\n", encoding="utf-8")
+    changed_files = {
+        str(questions_file): "modified",
+        str(module_file): "created",
+        str(deleted_file): "deleted",
+    }
+    assert mod.deduplicate_watch_events({"a": {"modified": True}, "b": {"created": True}, "c": {"deleted": True}}) == {
+        "a": "modified",
+        "b": "created",
+        "c": "deleted",
+    }
+    uploads = mod.classify_playground_paths(changed_files)
+    assert uploads["questions"] == [str(questions_file)]
+    assert uploads["modules"] == [str(module_file)]
+
+    calls = []
+    monkeypatch.setattr(
+        mod.requests,
+        "post",
+        lambda url, data=None, files=None, headers=None, timeout=None: (
+            calls.append((url, data, set(files.keys()))) or DummyResponse(status_code=204)
+        ),
+    )
+    assert mod.upload_playground_files("https://example.com", "key", "demo", changed_files) is True
+    assert calls[0][0].endswith("/api/playground")
+    assert calls[0][1]["folder"] == "questions"
+    assert calls[-1][1]["restart"] == "1"
+
+
+def test_playground_classification_and_upload_error_paths(tmp_path, monkeypatch):
+    deleted_python = {str(tmp_path / "docassemble" / "test" / "module.py"): "deleted"}
+    assert mod.classify_playground_paths(deleted_python) is None
+    assert mod.classify_playground_paths({str(tmp_path / "other.txt"): "modified"}) is None
+    assert (
+        mod.upload_playground_files("https://example.com", "key", "demo", {str(tmp_path / "other.txt"): "modified"})
+        is False
+    )
+
+    missing_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "missing.yml"
+    changed_files = {str(missing_file): "modified"}
+    assert mod.upload_playground_files("https://example.com", "key", "demo", changed_files) is True
+
+    live_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "live.yml"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text("---\n", encoding="utf-8")
+    changed_files = {str(live_file): "modified"}
+    monkeypatch.setattr(
+        mod.requests, "post", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
+    )
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: False)
+    assert mod.upload_playground_files("https://example.com", "key", "demo", changed_files) is False
+
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
+    assert mod.upload_playground_files("https://example.com", "key", "demo", changed_files) is False
+
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(click.ClickException):
+        mod.upload_playground_files("https://example.com", "key", "demo", changed_files)
+
+
+def test_upload_playground_files_default_project_success(tmp_path, monkeypatch):
+    live_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "live.yml"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text("---\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        mod.requests,
+        "post",
+        lambda url, data=None, files=None, headers=None, timeout=None: (
+            calls.append(data.copy()) or DummyResponse(status_code=200, json_data={"task_id": "task"})
+        ),
+    )
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
+    assert mod.upload_playground_files("https://example.com", "key", "default", {str(live_file): "modified"}) is True
+    assert "project" not in calls[0]
+
+
 def test_create_command(tmp_path, monkeypatch):
     prompts = iter(["", "", "", "", "Custom", "1.2.3"])
     monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(prompts))
@@ -517,6 +722,7 @@ def test_create_command(tmp_path, monkeypatch):
     output_dir = tmp_path / "docassemble-demo"
     assert mod.create.callback("demo", None, None, None, None, None, None, str(output_dir)) == 0
     assert (output_dir / "setup.py").is_file()
+    assert (output_dir / "pyproject.toml").is_file()
     assert (output_dir / "docassemble" / "demo" / "__init__.py").read_text(encoding="utf-8").strip() == (
         "__version__ = '1.2.3'"
     )
@@ -659,6 +865,247 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
     created = tmp_path / "docassemble-demo"
     assert created.is_dir()
     assert "The MIT License (MIT)" in (created / "LICENSE").read_text(encoding="utf-8")
+    assert (created / "pyproject.toml").is_file()
+
+
+def test_download_and_uninstall_commands(tmp_path, monkeypatch):
+    package_name = "docassemble.test"
+    archive_path = tmp_path / "archive.zip"
+    with mod.zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr("docassemble-test/README.md", "hello")
+
+    selected_server = {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}
+    monkeypatch.setattr(mod, "select_server", lambda *args, **kwargs: selected_server)
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/api/package"):
+            return DummyResponse(
+                status_code=200,
+                json_data=[
+                    {"name": "docassemble.other", "zip_file_number": 8},
+                    {"name": package_name, "zip_file_number": 7},
+                ],
+            )
+        if url.endswith("/api/file/7"):
+            return DummyResponse(status_code=200, chunks=[archive_path.read_bytes()])
+        raise AssertionError(url)
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    monkeypatch.chdir(tmp_path)
+    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == 0
+    assert (tmp_path / "docassemble-test" / "README.md").is_file()
+
+    monkeypatch.setattr(
+        mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
+    )
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
+    assert mod.uninstall.callback(("cfg", []), (None, None), "", True, "test") == 0
+
+
+def test_download_and_uninstall_error_paths(tmp_path, monkeypatch):
+    selected_server = {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}
+    monkeypatch.setattr(mod, "select_server", lambda *args, **kwargs: selected_server)
+
+    playground_calls = []
+
+    def fake_playground_get(url, params=None, **kwargs):
+        playground_calls.append(params)
+        return DummyResponse(status_code=404)
+
+    monkeypatch.setattr(mod.requests, "get", fake_playground_get)
+    assert mod.download.callback(("cfg", []), (None, None), "", "proj", False, "test") == "Package not found."
+    assert playground_calls[0]["project"] == "proj"
+
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=500))
+    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Unable to connect to server."
+
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
+    assert (
+        mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
+        == "Package installed but is not downloadable."
+    )
+
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.HTTPError("bad")))
+    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Error downloading package: bad"
+
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(click.ClickException):
+        mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
+
+    monkeypatch.setattr(mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
+    assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == "package DELETE returned 500: bad"
+
+    monkeypatch.setattr(
+        mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
+    )
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: False)
+    assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == 1
+
+    monkeypatch.setattr(mod.requests, "delete", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(click.ClickException):
+        mod.uninstall.callback(("cfg", []), (None, None), "", False, "test")
+
+
+def test_download_playground_success_and_overwrite_guard(tmp_path, monkeypatch):
+    selected_server = {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}
+    monkeypatch.setattr(mod, "select_server", lambda *args, **kwargs: selected_server)
+
+    archive_path = tmp_path / "archive.zip"
+    with mod.zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr("docassemble-test/README.md", "hello")
+
+    monkeypatch.setattr(
+        mod.requests,
+        "get",
+        lambda *args, **kwargs: DummyResponse(status_code=200, chunks=[archive_path.read_bytes()]),
+    )
+    monkeypatch.chdir(tmp_path)
+    assert mod.download.callback(("cfg", []), (None, None), "", "default", False, "test") == 0
+
+    collision_path = tmp_path / "docassemble-test" / "README.md"
+    collision_path.write_text("existing", encoding="utf-8")
+    assert (
+        mod.download.callback(("cfg", []), (None, None), "", "default", False, "test")
+        == "Unpacking the package here would overwrite existing files (docassemble-test/README.md). Use --overwrite if you want to overwrite existing files."
+    )
+    assert mod.download.callback(("cfg", []), (None, None), "", "default", True, "test") == 0
+
+
+def test_watch_handler_ignores_and_resets_deleted_bucket(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    file_path = package_dir / "module.py"
+    file_path.write_text("value = 1\n", encoding="utf-8")
+    handler = mod.WatchHandler(directory=str(package_dir))
+    monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
+    monkeypatch.setattr(mod.time, "time", lambda: 123)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "checksum:new")
+
+    assert handler.on_any_event(SimpleNamespace(is_directory=True, event_type="modified")) is None
+    assert (
+        handler.on_any_event(SimpleNamespace(is_directory=False, event_type="moved", src_path=str(file_path))) is None
+    )
+
+    mod.LAST_MODIFIED = {"time": 0, "files": {str(file_path): {"deleted": True}}, "restart": False}
+    handler.on_any_event(SimpleNamespace(is_directory=False, event_type="created", src_path=str(file_path)))
+    assert mod.LAST_MODIFIED["files"][str(file_path)] == {"created": True}
+
+
+def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "select_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+
+    package_calls = []
+    upload_calls = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
+    monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+
+    mod.FULL_INSTALL_DONE = True
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "ignored.yml"): {}}, "restart": False}
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] == 1:
+            mod.LAST_MODIFIED = {
+                "time": 1,
+                "files": {str(package_dir / "file.yml"): {"modified": True}},
+                "restart": False,
+            }
+            return None
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert package_calls == []
+    assert upload_calls[0]["playground"] == "stored-playground"
+
+
+def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "select_server",
+        lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+    installs = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
+    mod.FULL_INSTALL_DONE = False
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert installs[0]["restart"] == "no"
+
+
+def test_create_without_license_omits_project_license(tmp_path, monkeypatch):
+    output_dir = tmp_path / "docassemble-demo"
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: "")
+    assert (
+        mod.create.callback(
+            "demo", "Name", "dev@example.com", "Desc", "https://example.com", "", "0.1.0", str(output_dir)
+        )
+        == 0
+    )
+    pyproject_text = (output_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert "[project.license]" not in pyproject_text
 
 
 def test_wait_for_server_loop_and_nonplayground_info(monkeypatch):
