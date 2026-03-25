@@ -206,6 +206,30 @@ def common_params_for_installation(func):
     return wrapper
 
 
+def common_params_for_directory_and_playground(func):
+    @click.option(
+        "--directory",
+        "-d",
+        default=os.getcwd(),
+        type=click.Path(),
+        callback=validate_package_directory,
+        help="Specify package directory [default: current directory]",
+    )
+    @click.option(
+        "--playground",
+        "-p",
+        metavar="(PROJECT)",
+        is_flag=False,
+        flag_value="default",
+        help="Install into the default Playground or into the specified Playground project.",
+    )
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
 class APIURLType(click.ParamType):
     name = "url"
 
@@ -370,7 +394,8 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
                 )
             else:
                 click.secho(
-                    f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n{BELL}""", fg="red"
+                    f"""\nThe API URL or KEY is invalid. ({api_test.status_code} {api_test.text.strip()})\n{BELL}""",
+                    fg="red",
                 )
             return False
     except Exception as err:
@@ -617,11 +642,11 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                             condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(
                                 dependency_info["version"]
                             )
-                        elif dependency_info["operator"] == ">":
+                        elif dependency_info["operator"] == ">":  # pragma: no branch
                             condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(
                                 dependency_info["version"]
                             )
-                    if condition:
+                    if condition:  # pragma: no branch
                         dependency_info["installed"] = True
             if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
                 already_installed = True
@@ -737,7 +762,9 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         if success:
             click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installed.{BELL}""", fg="green")
         else:
-            click.secho(f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""", fg="red")
+            click.secho(
+                f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""", fg="red"
+            )
             return 1
     else:
         try:
@@ -1211,8 +1238,8 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
 @config.command(context_settings=CONTEXT_SETTINGS)
 @common_params_for_config
 @common_params_for_api
-@common_params_for_installation
-def add(config, api, directory, playground):
+@common_params_for_directory_and_playground
+def add(config, api, server, directory, playground):
     """
     Add a server to the config file.
     """
