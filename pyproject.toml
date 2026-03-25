@@ -11,7 +11,8 @@
         "click>=8.3.1",
         "gitmatch>=0.3.0",
         "packaging>=26.0",
-        "requests>=2.32.5",
+        "pyyaml>=6.0.3",
+        "requests>=2.33.0",
         "watchdog>=6.0.0",
     ]
     description = "Multi-platform CLI utility for working with docassemble packages and servers"
@@ -21,8 +22,8 @@
     license = { file = "LICENSE" }
     name = "docassemblecli3"
     readme = "README.md"
-    requires-python = ">= 3.10"
-    version = "0.5.1"
+    requires-python = ">= 3.12"
+    version = "26.03.0"
 
     [project.urls]
         "Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
