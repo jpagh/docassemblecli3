@@ -16,6 +16,7 @@ import click
 import gitmatch
 import requests
 import yaml
+from packaging.licenses import LICENSES as SPDX_LICENSES
 from packaging import version as packaging_version
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -343,6 +344,18 @@ def normalize_package_name(package: str) -> str:
     if not package_name.startswith("docassemble."):
         package_name = "docassemble." + package_name
     return package_name
+
+
+def normalize_license_string(license_name: str) -> str:
+    normalized_license = license_name.strip()
+    if not normalized_license:
+        return ""
+    spdx_license = SPDX_LICENSES.get(normalized_license.lower())
+    if spdx_license:
+        return spdx_license["id"]
+    if re.search(r"^LicenseRef-[A-Za-z\-0-9]+$", normalized_license):
+        return normalized_license
+    return "LicenseRef-" + re.sub(r"[^A-Za-z\-0-9]", "", normalized_license)
 
 
 def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
@@ -1372,7 +1385,8 @@ def create(package, developer_name, developer_email, description, url, license, 
         if not package_url:
             package_url = "https://docassemble.org"
     if not license:
-        license = click.prompt("License of package", default="MIT", show_default=True).strip()
+        license = click.prompt("License of package").strip()
+    license = normalize_license_string(license)
     if not version:
         version = click.prompt("Version of package", default="0.0.1", show_default=True).strip()
     initpy = """\
@@ -1448,7 +1462,7 @@ recursive-exclude * *.swp
 description_file = README.md
 """
     pyproject = f"""[build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -1469,7 +1483,7 @@ Homepage = {repr(package_url)}
 where = ["."]
 """
     if license:
-        pyproject += f"\n[project.license]\ntext = {repr(license)}\n"
+        pyproject += f'\nlicense = {repr(license)}\nlicense-files = ["LICENSE"]\n'
     setuppy = """\
 import os
 import sys

@@ -723,6 +723,10 @@ def test_create_command(tmp_path, monkeypatch):
     assert mod.create.callback("demo", None, None, None, None, None, None, str(output_dir)) == 0
     assert (output_dir / "setup.py").is_file()
     assert (output_dir / "pyproject.toml").is_file()
+    pyproject_text = (output_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'requires = ["setuptools==80.9.0"]' in pyproject_text
+    assert "LicenseRef-Custom" in pyproject_text
+    assert 'license-files = ["LICENSE"]' in pyproject_text
     assert (output_dir / "docassemble" / "demo" / "__init__.py").read_text(encoding="utf-8").strip() == (
         "__version__ = '1.2.3'"
     )
@@ -1105,7 +1109,15 @@ def test_create_without_license_omits_project_license(tmp_path, monkeypatch):
         == 0
     )
     pyproject_text = (output_dir / "pyproject.toml").read_text(encoding="utf-8")
-    assert "[project.license]" not in pyproject_text
+    assert "\nlicense = " not in pyproject_text
+    assert "license-files" not in pyproject_text
+
+
+def test_normalize_license_string_matches_docassemblecli_behavior():
+    assert mod.normalize_license_string("MIT") == "MIT"
+    assert mod.normalize_license_string("LicenseRef-Private") == "LicenseRef-Private"
+    assert mod.normalize_license_string("Custom license 1.0") == "LicenseRef-Customlicense10"
+    assert mod.normalize_license_string("") == ""
 
 
 def test_wait_for_server_loop_and_nonplayground_info(monkeypatch):
