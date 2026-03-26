@@ -28,6 +28,10 @@ execution.
 
 ## Installation
 
+To install `docassemblecli3`, run:
+
+    pip install docassemblecli3 
+
 To install `docassemblecli3` as a tool with `uv`, run:
 
     uv tool install docassemblecli3
@@ -43,7 +47,7 @@ Run commands in the project environment with `uv run`, for example:
 
 ## Usage
 
-`docassemblecli3` be more easily be run by typing `da`.
+`docassemblecli3` may be more easily be run by typing `da`.
 
 All of the command options, such as showing the "help", have both long `--help`
 and short `-h` versions. This documentation will always use the long version,
