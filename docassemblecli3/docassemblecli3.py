@@ -25,6 +25,9 @@ import tomllib
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
 
+global PROJECT_CONFIG
+PROJECT_CONFIG = ".docassemblecli"
+
 global LAST_MODIFIED
 LAST_MODIFIED = {
     "time": 0,
@@ -215,6 +218,12 @@ def common_params_for_installation(func):
         callback=validate_and_load_or_create_config,
         show_default=True,
         help="Specify the config file to use or leave it blank to skip using any config file",
+    )
+    @click.option(
+        "--project-config/--no-project-config",
+        default=True,
+        show_default=True,
+        help="Use .docassemblecli from the package directory first, then fall back to the selected config file",
     )
     @click.option(
         "--playground",
@@ -478,6 +487,88 @@ def validate_and_load_or_create_config(ctx, param, config: str) -> tuple[str, li
     except Exception:
         raise click.BadParameter("File is not a usable docassemblecli config.")
     return (config, env)
+
+
+def parse_project_command_config(data) -> tuple[list, dict[str, dict]]:
+    if isinstance(data, list):
+        return data, {"install": {}, "watch": {}}
+    if not isinstance(data, dict):
+        raise ValueError
+
+    servers = data.get("servers", [])
+    if servers is None:
+        servers = []
+    if not isinstance(servers, list):
+        raise ValueError
+
+    sections = {}
+    for command_name in ("install", "watch"):
+        section = data.get(command_name, {})
+        if section is None:
+            section = {}
+        if not isinstance(section, dict):
+            raise ValueError
+        sections[command_name] = section
+    return servers, sections
+
+
+def load_project_command_config(directory: str, command_name: str) -> tuple[str, list, dict]:
+    config_path = os.path.abspath(os.path.join(directory, PROJECT_CONFIG))
+    if not os.path.isfile(config_path):
+        raise click.BadParameter(f'"{config_path}" does not exist.', param_hint="--project-config")
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            data = yaml.load(fp, Loader=yaml.FullLoader)
+        servers, sections = parse_project_command_config(data)
+    except click.BadParameter:
+        raise
+    except Exception:
+        raise click.BadParameter("File is not a usable project config.", param_hint="--project-config")
+    return config_path, servers, sections.get(command_name, {})
+
+
+def merge_command_config(selected_server: dict, command_config: dict, api_provided: bool = False) -> dict:
+    merged_server = dict(selected_server)
+    for key, value in command_config.items():
+        if key == "server":
+            continue
+        if api_provided and key in ("apiurl", "apikey", "name"):
+            continue
+        merged_server[key] = value
+    if not merged_server.get("name") and merged_server.get("apiurl"):
+        merged_server["name"] = name_from_url(merged_server["apiurl"])
+    return merged_server
+
+
+def combine_config_envs(
+    primary_config: tuple[str | None, list], secondary_config: tuple[str | None, list]
+) -> tuple[str | None, list]:
+    primary_cfg, primary_env = primary_config
+    secondary_cfg, secondary_env = secondary_config
+    effective_cfg = primary_cfg or secondary_cfg
+    combined_env = list(primary_env or []) + list(secondary_env or [])
+    return effective_cfg, combined_env
+
+
+def resolve_command_server(
+    command_name: str,
+    directory: str,
+    config: tuple[str | None, list],
+    api: tuple[str | None, str | None],
+    server: str,
+    project_config: bool,
+) -> dict:
+    command_config = {}
+    if project_config:
+        project_config_path = os.path.abspath(os.path.join(directory, PROJECT_CONFIG))
+        if os.path.isfile(project_config_path):
+            project_cfg, project_env, command_config = load_project_command_config(directory, command_name)
+            config = combine_config_envs((project_cfg, project_env), config)
+    configured_server = command_config.get("server", "")
+    selected_server = select_server(*config, *api, server or configured_server, directory=directory)
+    if project_config:
+        selected_server = merge_command_config(selected_server, command_config, api_provided=bool(api[0] and api[1]))
+    return selected_server
 
 
 # -----------------------------------------------------------------------------
@@ -1000,13 +1091,15 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     show_default=True,
     help="On package install: yes, force a restart | no, do not restart | auto, only restart if the package has any .py files or if there are dependencies to be installed",
 )
-def install(directory, config, api, server, playground, restart):
+def install(directory, config, project_config, api, server, playground, restart):
     """
     Install a docassemble package on a docassemble server.
 
     `install` tries to get API info from the --api option first (if used), then from the first server listed in the ~/.docassemblecli file if it exists (unless the --config option is used), then it tries to use environmental variables, and finally it prompts the user directly.
     """
-    selected_server = select_server(*config, *api, server)
+    selected_server = resolve_command_server("install", directory, config, api, server, project_config)
+    if project_config and not playground and "playground" in selected_server:
+        playground = selected_server["playground"]
     click.echo(f"""Server: {selected_server["name"]}""")
     if not playground:
         click.echo("Location: Package")
@@ -1283,13 +1376,13 @@ class WatchHandler(FileSystemEventHandler):
     show_default=True,
     help="(On server restart only) Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.",
 )
-def watch(directory, config, api, server, playground, restart, buffer):
+def watch(directory, config, project_config, api, server, playground, restart, buffer):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
 
     If the --directory option is not specified, `watch` will look for a directory entry in the config file. The corresponding server entry will be selected automatically if the "directory" key in the config file matches the directory being watched. If a match is found, the "playground" key in the config file will be used if it exists and if no --playground option was specified.
     """
-    selected_server = select_server(*config, *api, server, directory=directory)
+    selected_server = resolve_command_server("watch", directory, config, api, server, project_config)
     restart_param = restart
     scan_directory(directory)
     global FULL_INSTALL_DONE, LAST_MODIFIED
@@ -1301,7 +1394,9 @@ def watch(directory, config, api, server, playground, restart, buffer):
     click.echo(f"""Server: {selected_server["name"]}""")
 
     if not playground:
-        if (
+        if project_config and "playground" in selected_server:
+            playground = selected_server["playground"]
+        elif (
             "directory" in selected_server
             and selected_server["directory"] == directory
             and "playground" in selected_server

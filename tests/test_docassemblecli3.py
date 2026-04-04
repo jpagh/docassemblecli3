@@ -198,6 +198,139 @@ def test_validate_package_directory_and_config(tmp_path, monkeypatch):
         mod.validate_and_load_or_create_config(None, None, str(tmp_path / "missing.yml"))
 
 
+def test_project_command_config_helpers(tmp_path):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "servers": [
+                    {
+                        "name": "watch.example.com",
+                        "apiurl": "https://watch.example.com",
+                        "apikey": "watch-key",
+                    },
+                    {
+                        "name": "install.example.com",
+                        "apiurl": "https://install.example.com",
+                        "apikey": "install-key",
+                    },
+                ],
+                "watch": {"server": "watch.example.com", "playground": "watch-play", "startup": "install"},
+                "install": {"server": "install.example.com", "playground": "install-play"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    project_cfg, env, watch_config = mod.load_project_command_config(str(package_dir), "watch")
+    assert project_cfg == str((package_dir / mod.PROJECT_CONFIG).resolve())
+    assert len(env) == 2
+    assert watch_config == {"server": "watch.example.com", "playground": "watch-play", "startup": "install"}
+
+    watch_server = mod.resolve_command_server("watch", str(package_dir), ("cfg", []), (None, None), "", True)
+    assert watch_server == {
+        "name": "watch.example.com",
+        "apiurl": "https://watch.example.com",
+        "apikey": "watch-key",
+        "playground": "watch-play",
+        "startup": "install",
+    }
+
+    install_server = mod.resolve_command_server("install", str(package_dir), ("cfg", []), (None, None), "", True)
+    assert install_server == {
+        "name": "install.example.com",
+        "apiurl": "https://install.example.com",
+        "apikey": "install-key",
+        "playground": "install-play",
+    }
+
+    fallback_server = mod.resolve_command_server(
+        "watch",
+        str(tmp_path / "missing"),
+        ("cfg", [{"name": "fallback.example.com", "apiurl": "https://fallback.example.com", "apikey": "fallback-key"}]),
+        (None, None),
+        "",
+        True,
+    )
+    assert fallback_server == {
+        "name": "fallback.example.com",
+        "apiurl": "https://fallback.example.com",
+        "apikey": "fallback-key",
+    }
+
+    with pytest.raises(click.BadParameter):
+        mod.load_project_command_config(str(tmp_path / "missing"), "watch")
+
+
+def test_project_command_config_error_and_merge_branches(tmp_path, monkeypatch):
+    assert mod.parse_project_command_config([]) == ([], {"install": {}, "watch": {}})
+    assert mod.parse_project_command_config({"servers": None, "install": None, "watch": {}}) == (
+        [],
+        {"install": {}, "watch": {}},
+    )
+
+    with pytest.raises(ValueError):
+        mod.parse_project_command_config("not-a-dict")
+
+    with pytest.raises(ValueError):
+        mod.parse_project_command_config({"servers": "not-a-list"})
+
+    with pytest.raises(ValueError):
+        mod.parse_project_command_config({"servers": [], "watch": []})
+
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    config_path = package_dir / mod.PROJECT_CONFIG
+    config_path.write_text("servers: wrong\n", encoding="utf-8")
+    with pytest.raises(click.BadParameter, match="usable project config"):
+        mod.load_project_command_config(str(package_dir), "watch")
+
+    config_path.write_text("servers: []\n", encoding="utf-8")
+
+    def raise_bad_parameter(*args, **kwargs):
+        raise click.BadParameter("bad project config")
+
+    monkeypatch.setattr(mod, "parse_project_command_config", raise_bad_parameter)
+    with pytest.raises(click.BadParameter, match="bad project config"):
+        mod.load_project_command_config(str(package_dir), "watch")
+
+    merged = mod.merge_command_config({}, {"apiurl": "https://named.example.com", "playground": "demo"})
+    assert merged == {
+        "apiurl": "https://named.example.com",
+        "name": "named.example.com",
+        "playground": "demo",
+    }
+
+    merged_with_api = mod.merge_command_config(
+        {"name": "original", "apiurl": "https://original.example.com", "apikey": "original-key"},
+        {
+            "server": "ignored",
+            "name": "override",
+            "apiurl": "https://override.example.com",
+            "apikey": "override-key",
+            "playground": "demo",
+        },
+        api_provided=True,
+    )
+    assert merged_with_api == {
+        "name": "original",
+        "apiurl": "https://original.example.com",
+        "apikey": "original-key",
+        "playground": "demo",
+    }
+
+
+def test_resolve_command_server_without_project_config(monkeypatch):
+    env = [{"name": "fallback.example.com", "apiurl": "https://fallback.example.com", "apikey": "key"}]
+
+    monkeypatch.setattr(mod.os.path, "isfile", lambda path: (_ for _ in ()).throw(AssertionError(path)))
+
+    selected_server = mod.resolve_command_server("install", "/tmp/pkg", ("cfg", env), (None, None), "", False)
+
+    assert selected_server == env[0]
+
+
 def test_display_select_and_env_helpers(monkeypatch, capsys):
     assert mod.name_from_url("") == ""
     assert mod.name_from_url("https://example.com/path") == "example.com"
@@ -517,10 +650,10 @@ def test_install_command_and_checksums(tmp_path, monkeypatch):
 
     selected_server = {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}
     calls = []
-    monkeypatch.setattr(mod, "select_server", lambda *args, **kwargs: selected_server)
+    monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: selected_server)
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: calls.append(kwargs) or 0)
 
-    assert mod.install.callback(str(package_dir), ("cfg", []), (None, None), "", None, "auto") == 0
+    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto") == 0
     assert calls[0]["directory"] == str(package_dir)
     assert mod.calculate_checksum(str(target))
 
@@ -636,7 +769,7 @@ def test_watch_command(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {
             "name": "example.com",
             "apiurl": "https://example.com",
@@ -659,13 +792,66 @@ def test_watch_command(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "auto", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert observer.stopped is True
     assert observer.joined is True
     assert installs[0]["playground"] == "stored-playground"
     assert installs[1]["restart"] == "yes"
+
+
+def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    install_calls = []
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda command_name, *args, **kwargs: {
+            "name": f"{command_name}.example.com",
+            "apiurl": f"https://{command_name}.example.com",
+            "apikey": f"{command_name}-key",
+            "playground": f"{command_name}-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: install_calls.append(kwargs) or 0)
+
+    assert mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto") == 0
+    assert install_calls[0]["playground"] == "install-playground"
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 1:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    assert mod.watch.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", 0) == (
+        '\nStopping "docassemblecli3 watch".'
+    )
+    assert install_calls[-1]["playground"] == "watch-playground"
 
 
 def test_watch_helpers_and_incremental_playground_upload(tmp_path, monkeypatch):
@@ -893,11 +1079,11 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
     installs = []
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
-    assert mod.install.callback(str(tmp_path), ("cfg", []), (None, None), "", "demo", "auto") == 0
+    assert mod.install.callback(str(tmp_path), ("cfg", []), False, (None, None), "", "demo", "auto") == 0
     assert installs[0]["playground"] == "demo"
 
     prompts = iter(["", "", "", "", "MIT", "0.0.1"])
@@ -1054,7 +1240,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {
             "name": "example.com",
             "apiurl": "https://example.com",
@@ -1087,7 +1273,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -1115,7 +1301,7 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {
             "name": "example.com",
             "apiurl": "https://example.com",
@@ -1142,7 +1328,7 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -1171,7 +1357,7 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
@@ -1187,7 +1373,7 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert installs[0]["restart"] == "no"
@@ -1555,7 +1741,7 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: 0)
@@ -1571,7 +1757,7 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", None, "auto", 0)
+        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0)
         == '\nStopping "docassemblecli3 watch".'
     )
 
@@ -1830,7 +2016,7 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
-        "select_server",
+        "resolve_command_server",
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: 0)
@@ -1838,7 +2024,7 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), (None, None), "", "explicit", "auto", 0)
+        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", "explicit", "auto", 0)
         == '\nStopping "docassemblecli3 watch".'
     )
 

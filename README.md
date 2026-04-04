@@ -171,6 +171,10 @@ works:
     -c, --config PATH            Specify the config file to use or leave it
                                 blank to skip using any config file  [default:
                                 C:\Users\current_user\.docassemblecli]
+    --project-config / --no-project-config
+                                Use .docassemblecli from the package directory
+                                first, then fall back to the selected config
+                                file  [default: project-config]
     -p, --playground (PROJECT)   Install into the default Playground or into the
                                 specified Playground project.
     -r, --restart [yes|no|auto]  On package install: yes, force a restart | no,
@@ -194,6 +198,12 @@ config file. Then you can select the server using `--server`:
 
 If you do not specify a `--server`, the first server indicated in your
 `.docassemblecli` file will be used.
+
+By default, `install` looks for a `.docassemblecli` file in the package
+directory first and falls back to `~/.docassemblecli` if none is present. Use
+`--no-project-config` if you want to skip the package-local file. The local
+file can define different default server and Playground settings for `install`
+and `watch`.
 
 The `--restart no` option can be used when your **docassemble** installation
 only uses one server (which is typical) and you are not modifying .py files. In
@@ -278,6 +288,10 @@ works:
     -c, --config PATH            Specify the config file to use or leave it
                                 blank to skip using any config file  [default:
                                 C:\Users\current_user\.docassemblecli]
+    --project-config / --no-project-config
+                                Use .docassemblecli from the package directory
+                                first, then fall back to the selected config
+                                file  [default: project-config]
     -p, --playground (PROJECT)   Install into the default Playground or into the
                                 specified Playground project.
     -a, --api <URL TEXT>...      URL of the docassemble server and API key of
@@ -309,6 +323,12 @@ file, it will cause that server to be used if no `server` is provided and the
 `directory` matches the `directory` that `watch` was given
 [default: current directory]. Additionally, if there is a `playground` key for
 that server, it will be used when using `watch`.
+
+By default, `watch` looks for a `.docassemblecli` file in the package
+directory first and falls back to `~/.docassemblecli` if none is present. Use
+`--no-project-config` if you want to skip the package-local file. The local
+file can point `watch` at one server and Playground while `install` uses
+another.
 
 #### watchdog
 
@@ -383,6 +403,37 @@ With this configuration:
 - `da watch` in `/path/to/docassemble-mypackage` will automatically use this server
 - It will install to the "testing" playground project
 - It will install the package once when `watch` starts
+
+For per-package defaults, a package directory can also contain its own
+`.docassemblecli` file. `da install` and `da watch` will use it automatically
+unless you pass `--no-project-config`.
+
+For example:
+
+```yaml
+servers:
+    - name: dev.example.com
+        apiurl: https://dev.example.com
+        apikey: DEVKEY
+    - name: prod.example.com
+        apiurl: https://prod.example.com
+        apikey: PRODKEY
+
+watch:
+    server: dev.example.com
+    playground: testing
+    startup: install
+
+install:
+    server: prod.example.com
+    playground: release
+```
+
+With this configuration:
+- `da watch` uses `dev.example.com` and the `testing` Playground
+- `da install` uses `prod.example.com` and the `release` Playground
+- If the local file is missing, both commands fall back to `~/.docassemblecli`
+- `--no-project-config` disables the local file for a command
 
 ## How it works
 
