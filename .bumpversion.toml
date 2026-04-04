@@ -4,10 +4,11 @@
     parse = """(?x)                 # Verbose mode
     (?P<release>                    # The release part
         (?:[0-9]{2})\\.             # YY.
-        (?:1[0-2]|0[1-9])           # MM
+        (?:1[0-2]|[1-9])            # M or MM
     )
     \\.(?P<patch>\\d+)              # .patch
 """
+    pre_commit_hooks = ["uv lock", "git add uv.lock"]
     serialize = ["{release}.{patch}"]
     tag = true
     tag_name = "v{new_version}"
@@ -18,7 +19,7 @@
         search   = 'version = "{current_version}"'
 
     [tool.bumpversion.parts.release]
-        calver_format = "{0Y}.{0M}"
+        calver_format = "{0Y}.{MM}"
 
     [tool.bumpversion.parts.patch]
         first_value = 0

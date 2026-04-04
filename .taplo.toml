@@ -26,6 +26,12 @@
         column_width        = 1
 
 [[rule]]
+    include = ["**/.bumpversion.toml"]
+
+    [rule.formatting]
+        reorder_arrays = false
+
+[[rule]]
     include = ["**/prek.toml"]
 
     [rule.formatting]
