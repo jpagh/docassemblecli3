@@ -181,6 +181,10 @@ works:
                                 do not restart | auto, only restart if the
                                 package has any .py files or if there are
                                 dependencies to be installed  [default: auto]
+    --dry-run                   Show what would be installed without uploading
+                                anything.
+    --show-files                With --dry-run, list the files that would be
+                                uploaded.
     -h, --help                   Show this message and exit.
 
 For example, you might want to pass the URL and API key in the command itself:
@@ -215,6 +219,10 @@ The `--restart yes` option should be used when you want to make sure that
 **docassemble** restarts the Python web application after the package is
 installed. By default, `da install` will avoid restarting the server if the
 package has no module files and all of its dependencies (if any) are installed.
+
+Use `--dry-run` to preview the target location and restart decision without
+modifying the server or Playground. Add `--show-files` if you also want the
+full file list.
 
 By default, `da install` installs a package on the server. If you want to install
 a package into your Playground, you can use the `--playground` option.
@@ -273,6 +281,12 @@ With `da watch --playground` constantly running, soon after you save a YAML file
 on your local machine, it will very quickly be available for testing on your
 server.
 
+Use `da watch --dry-run` to keep watching while printing each would-install
+action instead of uploading anything. When Playground changes can be uploaded
+incrementally, `watch` previews that smaller upload; otherwise it previews the
+full package install. Add `--show-files` if you also want the detailed file
+list for the preview.
+
 To exit `watch`, press **Ctrl + c**.
 
 You can run `da watch --help` to get more information about how `watch`
@@ -305,6 +319,10 @@ works:
                                 installation. If you are experiencing multiple
                                 installs back-to-back, try increasing this
                                 value.  [default: 3]
+    --dry-run                   Show what watch would install without uploading
+                                anything.
+    --show-files                With --dry-run, list the files that would be
+                                uploaded.
     -h, --help                   Show this message and exit.
 
 Your package's `.gitignore` file is also used by `watch` to decide which files

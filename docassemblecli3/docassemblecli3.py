@@ -384,6 +384,49 @@ def announce_installed() -> None:
     click.secho(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Installed.{BELL}", fg="green")
 
 
+def format_install_location(playground: str | None) -> str:
+    if not playground:
+        return "Package"
+    return f'''Playground "{playground}"'''
+
+
+def show_dry_run_file_hint(show_files: bool) -> None:
+    if not show_files:
+        click.echo("Use --show-files to list the files in the preview.")
+
+
+def show_dry_run_package_install(
+    playground: str | None, should_restart: bool, archived_files: list[str], show_files: bool = False
+) -> None:
+    click.secho("Dry run: no changes were sent.", fg="cyan")
+    click.echo(f"Would upload {len(archived_files)} file(s) to {format_install_location(playground)}.")
+    click.echo(f"Would restart server: {'yes' if should_restart else 'no'}")
+    if show_files and archived_files:
+        click.echo("Files to upload:")
+        for archived_file in archived_files:
+            click.echo("  " + archived_file)
+    elif archived_files:
+        show_dry_run_file_hint(show_files)
+
+
+def show_dry_run_playground_upload(playground: str, uploads: dict[str, list[str]], show_files: bool = False) -> None:
+    total_files = sum(len(files_to_upload) for files_to_upload in uploads.values())
+    click.secho("Dry run: no changes were sent.", fg="cyan")
+    click.echo(f"Would upload {total_files} changed file(s) to {format_install_location(playground)}.")
+    click.echo(f"Would restart server: {'yes' if uploads['modules'] else 'no'}")
+    click.echo("Folders to upload:")
+    for folder in ("questions", "sources", "static", "templates", "modules"):
+        if uploads[folder]:
+            click.echo(f"  {folder}: {len(uploads[folder])}")
+    if show_files:
+        click.echo("Files to upload:")
+        for folder in ("questions", "sources", "static", "templates", "modules"):
+            for file_path in uploads[folder]:
+                click.echo("  " + file_path)
+    elif total_files:
+        show_dry_run_file_hint(show_files)
+
+
 def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
     deduplicated = {}
     for file_path, event_types in file_events.items():
@@ -416,10 +459,20 @@ def classify_playground_paths(changed_files: dict[str, str]) -> dict[str, list[s
     return uploads
 
 
-def upload_playground_files(apiurl: str, apikey: str, playground: str, changed_files: dict[str, str]) -> bool:
+def upload_playground_files(
+    apiurl: str,
+    apikey: str,
+    playground: str,
+    changed_files: dict[str, str],
+    dry_run: bool = False,
+    show_files: bool = False,
+) -> bool:
     uploads = classify_playground_paths(changed_files)
     if uploads is None:
         return False
+    if dry_run:
+        show_dry_run_playground_upload(playground, uploads, show_files=show_files)
+        return True
 
     for folder in ("questions", "sources", "static", "templates", "modules"):
         files_to_upload = uploads[folder]
@@ -824,9 +877,10 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
 # -----------------------------------------------------------------------------
 
 
-def package_installer(directory, apiurl, apikey, playground, restart):
+def package_installer(directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False):
     archive = tempfile.NamedTemporaryFile(suffix=".zip")
     zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w")
+    archived_files = []
     try:
         ignore_process = subprocess.run(
             ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
@@ -878,12 +932,14 @@ def package_installer(directory, apiurl, apikey, playground, restart):
                 and the_file != "__init__.py"
             ):
                 has_python_files = True
+            archived_files.append(os.path.relpath(os.path.join(root, the_file), directory))
             zf.write(
                 os.path.join(root, the_file),
                 os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")),
             )
     zf.close()
     archive.seek(0)
+    archived_files.sort()
     if restart == "no":
         should_restart = False
     elif restart == "yes" or has_python_files:
@@ -936,26 +992,35 @@ def package_installer(directory, apiurl, apikey, playground, restart):
         should_restart = True
     data = {}
     if should_restart:
-        try:
-            server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
-            if server_packages.status_code != 200:
-                if server_packages.status_code == 403:
-                    click.secho("""\nThe API KEY is invalid.""", fg="red")
-                server_packages.raise_for_status()
-            else:
-                installed_packages = server_packages.json()
-                for package in installed_packages:
-                    if package.get("name", "") == "docassemble.base":
-                        server_version_da = package.get("version", "0")
-        except Exception as err:
-            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-            raise click.ClickException(f"""{err}\n""")
-        click.secho("Server will restart.", fg="yellow")
+        if not dry_run:
+            try:
+                server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
+                if server_packages.status_code != 200:
+                    if server_packages.status_code == 403:
+                        click.secho("""\nThe API KEY is invalid.""", fg="red")
+                    server_packages.raise_for_status()
+                else:
+                    installed_packages = server_packages.json()
+                    for package in installed_packages:
+                        if package.get("name", "") == "docassemble.base":
+                            server_version_da = package.get("version", "0")
+            except Exception as err:
+                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                raise click.ClickException(f"""{err}\n""")
+            click.secho("Server will restart.", fg="yellow")
     if not should_restart:
         server_version_da = "norestart"
         data["restart"] = "0"
-    if DEBUG:
+    if DEBUG and not dry_run:
         click.echo(f"""Server version: {server_version_da}.""")
+    if dry_run:
+        show_dry_run_package_install(
+            playground=playground,
+            should_restart=should_restart,
+            archived_files=archived_files,
+            show_files=show_files,
+        )
+        return 0
     if playground:
         if playground != "default":
             data["project"] = playground
@@ -1091,7 +1156,9 @@ def package_installer(directory, apiurl, apikey, playground, restart):
     show_default=True,
     help="On package install: yes, force a restart | no, do not restart | auto, only restart if the package has any .py files or if there are dependencies to be installed",
 )
-def install(directory, config, project_config, api, server, playground, restart):
+@click.option("--dry-run", is_flag=True, help="Show what would be installed without uploading anything.")
+@click.option("--show-files", is_flag=True, help="With --dry-run, list the files that would be uploaded.")
+def install(directory, config, project_config, api, server, playground, restart, dry_run, show_files):
     """
     Install a docassemble package on a docassemble server.
 
@@ -1105,13 +1172,20 @@ def install(directory, config, project_config, api, server, playground, restart)
         click.echo("Location: Package")
     else:
         click.echo(f"""Location: Playground "{playground}" """)
-    click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
+    if dry_run:
+        click.secho(
+            f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""", fg="cyan"
+        )
+    else:
+        click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
     return package_installer(
         directory=directory,
         apiurl=selected_server["apiurl"],
         apikey=selected_server["apikey"],
         playground=playground,
         restart=restart,
+        dry_run=dry_run,
+        show_files=show_files,
     )
 
 
@@ -1376,7 +1450,9 @@ class WatchHandler(FileSystemEventHandler):
     show_default=True,
     help="(On server restart only) Set the buffer (wait time) between a file change event and package installation. If you are experiencing multiple installs back-to-back, try increasing this value.",
 )
-def watch(directory, config, project_config, api, server, playground, restart, buffer):
+@click.option("--dry-run", is_flag=True, help="Show what watch would install without uploading anything.")
+@click.option("--show-files", is_flag=True, help="With --dry-run, list the files that would be uploaded.")
+def watch(directory, config, project_config, api, server, playground, restart, buffer, dry_run, show_files):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
 
@@ -1408,13 +1484,18 @@ def watch(directory, config, project_config, api, server, playground, restart, b
         click.echo(f"""Location: Playground "{playground}" """)
 
     if "startup" in selected_server and selected_server["startup"] == "install":
-        click.secho("""Installing on startup.""", fg="cyan")
+        if dry_run:
+            click.secho("""Previewing startup install.""", fg="cyan")
+        else:
+            click.secho("""Installing on startup.""", fg="cyan")
         startup_result = package_installer(
             directory=directory,
             apiurl=selected_server["apiurl"],
             apikey=selected_server["apikey"],
             playground=playground,
             restart=restart,
+            dry_run=dry_run,
+            show_files=show_files,
         )
         FULL_INSTALL_DONE = startup_result == 0
         click.echo("")
@@ -1430,7 +1511,15 @@ def watch(directory, config, project_config, api, server, playground, restart, b
                     LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
                     time.sleep(0.2)
                     continue
-                click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
+                if dry_run:
+                    click.secho(
+                        f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
+                        fg="cyan",
+                    )
+                else:
+                    click.secho(
+                        f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow"
+                    )
                 if restart_param == "yes" or (restart_param == "auto" and LAST_MODIFIED["restart"]):
                     effective_restart = "yes"
                     time.sleep(buffer)
@@ -1447,9 +1536,14 @@ def watch(directory, config, project_config, api, server, playground, restart, b
                         apikey=selected_server["apikey"],
                         playground=playground,
                         changed_files=changed_files,
+                        dry_run=dry_run,
+                        show_files=show_files,
                     )
                     if uploaded:
-                        announce_installed()
+                        if dry_run:
+                            click.secho("Dry run: incremental Playground upload preview complete.", fg="cyan")
+                        else:
+                            announce_installed()
                         install_result = 0
 
                 if install_result is None:
@@ -1459,6 +1553,8 @@ def watch(directory, config, project_config, api, server, playground, restart, b
                         apikey=selected_server["apikey"],
                         playground=playground,
                         restart=effective_restart,
+                        dry_run=dry_run,
+                        show_files=show_files,
                     )
                 FULL_INSTALL_DONE = install_result == 0
             time.sleep(1)

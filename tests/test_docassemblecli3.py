@@ -653,12 +653,133 @@ def test_install_command_and_checksums(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: selected_server)
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: calls.append(kwargs) or 0)
 
-    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto") == 0
+    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", False, False) == 0
     assert calls[0]["directory"] == str(package_dir)
+    assert calls[0]["dry_run"] is False
+    assert calls[0]["show_files"] is False
+    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", True, True) == 0
+    assert calls[1]["dry_run"] is True
+    assert calls[1]["show_files"] is True
     assert mod.calculate_checksum(str(target))
 
     monkeypatch.setattr(mod, "open", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")), raising=False)
     assert mod.calculate_checksum(str(target)) == ""
+
+
+def test_package_installer_dry_run_has_no_writes(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {"docassemble/test/module.py": "value = 1\n"},
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    post_calls = []
+    wait_calls = []
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no get")))
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: post_calls.append(args) or DummyResponse())
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: wait_calls.append(kwargs) or True)
+
+    assert (
+        mod.package_installer(
+            str(package_dir), "https://example.com", "key", playground=None, restart="yes", dry_run=True
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Dry run: no changes were sent." in output
+    assert "Would restart server: yes" in output
+    assert "Files to upload:" not in output
+    assert "module.py" not in output
+    assert "Use --show-files to list the files in the preview." in output
+
+    assert (
+        mod.package_installer(
+            str(package_dir),
+            "https://example.com",
+            "key",
+            playground=None,
+            restart="yes",
+            dry_run=True,
+            show_files=True,
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Files to upload:" in output
+    assert "module.py" in output
+    assert post_calls == []
+    assert wait_calls == []
+
+
+def test_upload_playground_files_dry_run_has_no_writes(tmp_path, monkeypatch, capsys):
+    live_file = tmp_path / "docassemble" / "test" / "data" / "questions" / "live.yml"
+    live_file.parent.mkdir(parents=True, exist_ok=True)
+    live_file.write_text("---\n", encoding="utf-8")
+
+    post_calls = []
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: post_calls.append(args) or DummyResponse())
+
+    assert (
+        mod.upload_playground_files(
+            "https://example.com",
+            "key",
+            "demo",
+            {str(live_file): "modified"},
+            dry_run=True,
+            show_files=False,
+        )
+        is True
+    )
+    output = capsys.readouterr().out
+    assert "Dry run: no changes were sent." in output
+    assert "questions: 1" in output
+    assert str(live_file) not in output
+    assert "Use --show-files to list the files in the preview." in output
+
+    assert (
+        mod.upload_playground_files(
+            "https://example.com",
+            "key",
+            "demo",
+            {str(live_file): "modified"},
+            dry_run=True,
+            show_files=True,
+        )
+        is True
+    )
+    output = capsys.readouterr().out
+    assert "Files to upload:" in output
+    assert str(live_file) in output
+    assert post_calls == []
+
+
+def test_dry_run_helper_zero_file_paths(capsys):
+    mod.show_dry_run_file_hint(True)
+    assert capsys.readouterr().out == ""
+
+    mod.show_dry_run_package_install(playground=None, should_restart=False, archived_files=[], show_files=False)
+    output = capsys.readouterr().out
+    assert "Would upload 0 file(s) to Package." in output
+    assert "Use --show-files" not in output
+
+    mod.show_dry_run_playground_upload(
+        "demo",
+        {"questions": [], "sources": [], "static": [], "templates": [], "modules": []},
+        show_files=False,
+    )
+    output = capsys.readouterr().out
+    assert 'Would upload 0 changed file(s) to Playground "demo".' in output
+    assert "Use --show-files" not in output
 
 
 def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monkeypatch):
@@ -792,7 +913,7 @@ def test_watch_command(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0, False, False)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert observer.stopped is True
@@ -818,7 +939,7 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: install_calls.append(kwargs) or 0)
 
-    assert mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto") == 0
+    assert mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", False, False) == 0
     assert install_calls[0]["playground"] == "install-playground"
 
     class FakeObserver:
@@ -848,7 +969,7 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    assert mod.watch.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", 0) == (
+    assert mod.watch.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", 0, False, False) == (
         '\nStopping "docassemblecli3 watch".'
     )
     assert install_calls[-1]["playground"] == "watch-playground"
@@ -1083,7 +1204,7 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
-    assert mod.install.callback(str(tmp_path), ("cfg", []), False, (None, None), "", "demo", "auto") == 0
+    assert mod.install.callback(str(tmp_path), ("cfg", []), False, (None, None), "", "demo", "auto", False, False) == 0
     assert installs[0]["playground"] == "demo"
 
     prompts = iter(["", "", "", "", "MIT", "0.0.1"])
@@ -1273,7 +1394,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -1328,12 +1449,158 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
     assert upload_calls[0]["playground"] == "stored-playground"
     assert "Installed.\a" in capsys.readouterr().out
+
+
+def test_watch_dry_run_uses_incremental_playground_preview(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+
+    package_calls = []
+    upload_calls = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
+    monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+
+    mod.FULL_INSTALL_DONE = True
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
+
+    def fake_sleep(seconds):
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, True, False)
+
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert package_calls == []
+    assert upload_calls[0]["dry_run"] is True
+    assert upload_calls[0]["show_files"] is False
+    assert "incremental Playground upload preview complete" in capsys.readouterr().out
+
+
+def test_watch_startup_install_message_non_dry_run(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "startup": "install",
+        },
+    )
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: 0)
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 1:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    assert mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False) == (
+        '\nStopping "docassemblecli3 watch".'
+    )
+    assert "Installing on startup." in capsys.readouterr().out
+
+
+def test_watch_startup_install_message_dry_run(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "startup": "install",
+        },
+    )
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: 0)
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 1:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    assert mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, True, False) == (
+        '\nStopping "docassemblecli3 watch".'
+    )
+    assert "Previewing startup install." in capsys.readouterr().out
 
 
 def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
@@ -1373,7 +1640,7 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0)
+    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert installs[0]["restart"] == "no"
@@ -1757,7 +2024,7 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0)
+        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0, False, False)
         == '\nStopping "docassemblecli3 watch".'
     )
 
@@ -2024,7 +2291,7 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", "explicit", "auto", 0)
+        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", "explicit", "auto", 0, False, False)
         == '\nStopping "docassemblecli3 watch".'
     )
 
