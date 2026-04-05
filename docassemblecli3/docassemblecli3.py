@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import click
 import gitmatch
-import requests
+import niquests as requests
 import yaml
 from packaging.licenses import LICENSES as SPDX_LICENSES
 from packaging import version as packaging_version

@@ -8,11 +8,11 @@
         "Programming Language :: Python",
     ]
     dependencies = [
-        "click>=8.3.1",
+        "click>=8.3.2",
         "gitmatch>=0.3.0",
+        "niquests>=3.18.4",
         "packaging>=26.0",
         "pyyaml>=6.0.3",
-        "requests>=2.33.0",
         "watchdog>=6.0.0",
     ]
     description = "Multi-platform CLI utility for working with docassemble packages and servers"

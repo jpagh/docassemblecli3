@@ -7,8 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import click
+import niquests as requests
 import pytest
-import requests
 import yaml
 from click.testing import CliRunner
 
