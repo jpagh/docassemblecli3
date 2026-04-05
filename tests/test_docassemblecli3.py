@@ -198,6 +198,22 @@ def test_validate_package_directory_and_config(tmp_path, monkeypatch):
         mod.validate_and_load_or_create_config(None, None, str(tmp_path / "missing.yml"))
 
 
+def test_common_params_for_directory_and_playground_decorator(tmp_path, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    @click.command()
+    @mod.common_params_for_directory_and_playground
+    def command(directory, playground):
+        click.echo(f"{directory}|{playground}")
+
+    result = runner.invoke(command, ["--directory", str(package_dir), "--playground", "demo"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"{package_dir.resolve()}|demo"
+
+
 def test_project_command_config_helpers(tmp_path):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -259,11 +275,130 @@ def test_project_command_config_helpers(tmp_path):
         "apikey": "fallback-key",
     }
 
+
+def test_project_config_load_save_error_paths(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / mod.PROJECT_CONFIG).write_text("servers: invalid\n", encoding="utf-8")
+
     with pytest.raises(click.BadParameter):
-        mod.load_project_command_config(str(tmp_path / "missing"), "watch")
+        mod.load_or_create_project_config(str(package_dir))
+
+    messages = []
+    monkeypatch.setattr(mod.click, "echo", messages.append)
+    monkeypatch.setattr(
+        mod.yaml,
+        "dump",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")),
+    )
+
+    assert mod.save_project_config(str(package_dir / mod.PROJECT_CONFIG), [], {"install": {}, "watch": {}}) is False
+    assert "Unable to save" in messages[0]
+
+
+def test_config_target_prompt_helpers(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    messages = []
+    monkeypatch.setattr(mod.click, "echo", messages.append)
+
+    scope_answers = iter(["maybe", "g", "LOCAL"])
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(scope_answers))
+    assert mod.prompt_for_config_scope() == "global"
+    assert mod.prompt_for_config_scope() == "local"
+    assert 'Please enter "g", "global", "l", or "local".' in messages
+
+    playground_answers = iter(["  demo  ", "   "])
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(playground_answers))
+    assert mod.prompt_for_optional_playground() == "demo"
+    assert mod.prompt_for_optional_playground() is None
+
+    command_playground_answers = iter(["  release  ", " "])
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(command_playground_answers))
+    assert mod.prompt_for_command_playground("install") == "release"
+    assert mod.prompt_for_command_playground("watch") is None
+
+    confirm_answers = iter([True, False, True, False])
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: next(confirm_answers))
+    assert mod.prompt_for_command_default("install") is True
+    assert mod.prompt_for_command_default("watch") is False
+    assert mod.prompt_for_watch_startup() == "install"
+    assert mod.prompt_for_watch_startup() is None
+
+    directory_answers = iter([str(tmp_path / "missing"), ""])
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(directory_answers))
+    assert mod.prompt_for_optional_directory() is None
+    assert any("does not exist" in message for message in messages)
+
+    assert mod.resolve_project_config_directory(str(package_dir)) == str(package_dir.resolve())
+
+    monkeypatch.chdir(package_dir)
+    assert mod.resolve_project_config_directory(None) == str(package_dir.resolve())
+
+    messages.clear()
+    invalid_cwd = tmp_path / "not-a-package"
+    invalid_cwd.mkdir()
+    prompted_directories = iter([str(tmp_path / "still-missing"), str(package_dir)])
+    monkeypatch.chdir(invalid_cwd)
+    monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(prompted_directories))
+    assert mod.resolve_project_config_directory(None) == str(package_dir.resolve())
+    assert any("does not exist" in message for message in messages)
+
+    with pytest.raises(click.BadParameter):
+        mod.resolve_config_target("global.yml", True, False, None)
+
+
+def test_apply_project_command_defaults():
+    sections = {
+        "install": {"server": "old-install", "playground": "old-play"},
+        "watch": {"server": "old-watch", "playground": "old-watch-play", "startup": "install"},
+    }
+
+    updated = mod.apply_project_command_defaults(
+        sections=sections,
+        server_name="new.example.com",
+        configure_install=True,
+        install_playground=None,
+        configure_watch=True,
+        watch_playground="testing",
+        watch_startup=None,
+    )
+
+    assert updated["install"] == {"server": "new.example.com"}
+    assert updated["watch"] == {"server": "new.example.com", "playground": "testing"}
+    assert sections["watch"]["startup"] == "install"
+
+
+def test_ensure_api_credentials_retries(monkeypatch):
+    prompts = iter(
+        [
+            ("https://first.example.com", "bad-key"),
+            ("https://second.example.com", "good-key"),
+        ]
+    )
+    monkeypatch.setattr(mod, "prompt_for_api", lambda **kwargs: next(prompts))
+    attempts = []
+    monkeypatch.setattr(
+        mod,
+        "test_apiurl_apikey",
+        lambda **kwargs: attempts.append(kwargs) or kwargs["apikey"] == "good-key",
+    )
+
+    apiurl, apikey = mod.ensure_api_credentials(None, None)
+
+    assert (apiurl, apikey) == ("https://second.example.com", "good-key")
+    assert attempts == [
+        {"apiurl": "https://first.example.com", "apikey": "bad-key"},
+        {"apiurl": "https://second.example.com", "apikey": "good-key"},
+    ]
 
 
 def test_project_command_config_error_and_merge_branches(tmp_path, monkeypatch):
+    with pytest.raises(click.BadParameter):
+        mod.load_project_command_config(str(tmp_path / "missing"), "watch")
+
     assert mod.parse_project_command_config([]) == ([], {"install": {}, "watch": {}})
     assert mod.parse_project_command_config({"servers": None, "install": None, "watch": {}}) == (
         [],
@@ -1102,6 +1237,7 @@ def test_config_commands(tmp_path, monkeypatch, runner):
 
     added = []
     monkeypatch.setattr(mod, "add_server_to_env", lambda **kwargs: added.append(kwargs) or kwargs["env"])
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
     (tmp_path / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
     result = runner.invoke(
         mod.cli,
@@ -1122,12 +1258,17 @@ def test_config_commands(tmp_path, monkeypatch, runner):
     assert result.exit_code == 0
     assert added[0]["directory"] == str(tmp_path.resolve())
 
-    config = (str(config_path), [{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}])
+    config_path.write_text(
+        yaml.safe_dump([{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}]),
+        encoding="utf-8",
+    )
+
     monkeypatch.setattr(mod, "save_config", lambda **kwargs: True)
     monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: "example.com")
-    assert mod.remove.callback(config, None) is None
+    monkeypatch.setattr(mod, "prompt_for_config_scope", lambda: "global")
+    assert mod.remove.callback(str(config_path), False, False, None, None) is None
 
-    mod.display.callback((str(config_path), [{"name": "example.com"}]))
+    mod.show.callback(str(config_path), False, False, None)
 
     new_path = tmp_path / "new-config.yml"
     monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
@@ -1178,6 +1319,349 @@ def test_config_commands(tmp_path, monkeypatch, runner):
     assert tested == [{"apiurl": "https://example.com", "apikey": "key"}]
 
 
+def test_config_add_prompts_for_global_target(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    default_config = tmp_path / "global.yml"
+    monkeypatch.setattr(mod, "DEFAULT_CONFIG", str(default_config))
+    monkeypatch.setattr(mod, "prompt_for_config_scope", lambda: "global")
+    monkeypatch.setattr(mod, "prompt_for_optional_directory", lambda: str(package_dir))
+    monkeypatch.setattr(mod, "prompt_for_optional_playground", lambda: "demo")
+    monkeypatch.setattr(mod, "prompt_for_api", lambda **kwargs: ("https://global.example.com", "key"))
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    saved = []
+    monkeypatch.setattr(mod, "save_config", lambda cfg, env: saved.append((cfg, list(env))) or True)
+
+    result = runner.invoke(mod.cli, ["config", "add"])
+
+    assert result.exit_code == 0
+    assert saved[0][0] == str(default_config.resolve())
+    assert saved[0][1][0]["name"] == "global.example.com"
+    assert saved[0][1][0]["directory"] == str(package_dir.resolve())
+    assert saved[0][1][0]["playground"] == "demo"
+
+
+def test_config_add_prompts_for_local_project_config(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    monkeypatch.chdir(package_dir)
+    monkeypatch.setattr(mod, "prompt_for_config_scope", lambda: "local")
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_optional_directory",
+        lambda: (_ for _ in ()).throw(AssertionError("directory prompt should not be used for local config")),
+    )
+    monkeypatch.setattr(mod, "prompt_for_optional_playground", lambda: "demo")
+    command_defaults = iter([True, True])
+    monkeypatch.setattr(mod, "prompt_for_command_default", lambda command_name: next(command_defaults))
+    command_playgrounds = iter(["release", "testing"])
+    monkeypatch.setattr(mod, "prompt_for_command_playground", lambda command_name: next(command_playgrounds))
+    monkeypatch.setattr(mod, "prompt_for_watch_startup", lambda: "install")
+    monkeypatch.setattr(mod, "prompt_for_api", lambda **kwargs: ("https://local.example.com", "key"))
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(mod.cli, ["config", "add"])
+
+    assert result.exit_code == 0
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["servers"][0]["name"] == "local.example.com"
+    assert project_data["servers"][0]["playground"] == "demo"
+    assert "directory" not in project_data["servers"][0]
+    assert project_data["install"] == {"server": "local.example.com", "playground": "release"}
+    assert project_data["watch"] == {
+        "server": "local.example.com",
+        "playground": "testing",
+        "startup": "install",
+    }
+
+
+def test_config_add_project_config_cli_skips_prompts(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_config_scope",
+        lambda: (_ for _ in ()).throw(AssertionError("config scope prompt should be skipped")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_optional_playground",
+        lambda: (_ for _ in ()).throw(AssertionError("playground prompt should be skipped")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_api",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("API prompt should be skipped")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_command_default",
+        lambda command_name: (_ for _ in ()).throw(AssertionError("command default prompt should be skipped")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_command_playground",
+        lambda command_name: (_ for _ in ()).throw(AssertionError("command playground prompt should be skipped")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_watch_startup",
+        lambda: (_ for _ in ()).throw(AssertionError("watch startup prompt should be skipped")),
+    )
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--api",
+            "https://explicit.example.com",
+            "key",
+            "--directory",
+            str(package_dir),
+            "--playground",
+            "demo",
+            "--install-default",
+            "--install-playground",
+            "release",
+            "--watch-default",
+            "--watch-playground",
+            "testing",
+            "--watch-startup",
+            "install",
+        ],
+    )
+
+    assert result.exit_code == 0
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["servers"][0] == {
+        "apiurl": "https://explicit.example.com",
+        "apikey": "key",
+        "name": "explicit.example.com",
+        "directory": str(package_dir.resolve()),
+        "playground": "demo",
+    }
+    assert project_data["install"] == {"server": "explicit.example.com", "playground": "release"}
+    assert project_data["watch"] == {
+        "server": "explicit.example.com",
+        "playground": "testing",
+        "startup": "install",
+    }
+
+
+def test_config_add_local_command_options_imply_project_config(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_config_scope",
+        lambda: (_ for _ in ()).throw(AssertionError("config scope prompt should be skipped")),
+    )
+    monkeypatch.setattr(mod, "prompt_for_optional_playground", lambda: None)
+    monkeypatch.setattr(mod, "prompt_for_command_playground", lambda command_name: None)
+    monkeypatch.setattr(mod, "prompt_for_watch_startup", lambda: None)
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--api",
+            "https://implicit.example.com",
+            "key",
+            "--directory",
+            str(package_dir),
+            "--install-default",
+            "--watch-default",
+        ],
+    )
+
+    assert result.exit_code == 0
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["install"] == {"server": "implicit.example.com"}
+    assert project_data["watch"] == {"server": "implicit.example.com"}
+
+
+def test_config_add_rejects_local_command_options_with_global_config(tmp_path, monkeypatch, runner):
+    config_path = tmp_path / "global.yml"
+    config_path.write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--global-config",
+            "--api",
+            "https://global.example.com",
+            "key",
+            "--install-default",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "package-local project config" in result.output
+
+
+def test_config_add_rejects_conflicting_local_command_options(tmp_path, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    install_result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--directory",
+            str(package_dir),
+            "--no-install-default",
+            "--install-playground",
+            "release",
+        ],
+    )
+    assert install_result.exit_code != 0
+    assert "--no-install-default" in install_result.output
+
+    watch_result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--directory",
+            str(package_dir),
+            "--no-watch-default",
+            "--watch-startup",
+            "install",
+        ],
+    )
+    assert watch_result.exit_code != 0
+    assert "--no-watch-default" in watch_result.output
+
+
+def test_config_add_watch_startup_none_clears_startup(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "servers": [],
+                "install": {},
+                "watch": {"server": "old.example.com", "startup": "install"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--api",
+            "https://watch-none.example.com",
+            "key",
+            "--directory",
+            str(package_dir),
+            "--playground",
+            "demo",
+            "--no-install-default",
+            "--watch-default",
+            "--watch-playground",
+            "testing",
+            "--watch-startup",
+            "none",
+        ],
+    )
+
+    assert result.exit_code == 0
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["watch"] == {"server": "watch-none.example.com", "playground": "testing"}
+
+
+def test_config_add_project_config_save_failure(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+    monkeypatch.setattr(mod, "prompt_for_command_default", lambda command_name: False)
+    monkeypatch.setattr(mod, "save_project_config", lambda *args, **kwargs: False)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--api",
+            "https://explicit.example.com",
+            "key",
+            "--directory",
+            str(package_dir),
+            "--playground",
+            "demo",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Configuration saved:" not in result.output
+
+
+def test_config_show_and_remove_local_project_config(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "servers": [{"name": "local.example.com", "apiurl": "https://local.example.com", "apikey": "key"}],
+                "install": {"server": "local.example.com", "playground": "release"},
+                "watch": {"server": "local.example.com", "playground": "testing", "startup": "install"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(package_dir)
+    monkeypatch.setattr(mod, "prompt_for_config_scope", lambda: "local")
+
+    assert mod.show.callback(None, False, False, None) is None
+    output = capsys.readouterr().out
+    assert "local.example.com" in output
+    assert "install:" in output
+    assert "server: local.example.com" in output
+    assert "playground: release" in output
+    assert "watch:" in output
+    assert "playground: testing" in output
+    assert "startup: install" in output
+
+    assert mod.remove.callback(None, False, False, None, "local.example.com") is None
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["servers"] == []
+    assert project_data["install"] == {"server": "local.example.com", "playground": "release"}
+    assert project_data["watch"] == {"server": "local.example.com", "playground": "testing", "startup": "install"}
+
+
 def test_display_servers_install_playground_and_create_defaults(tmp_path, monkeypatch):
     servers = mod.display_servers(
         [
@@ -1191,6 +1675,25 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
         "second",
         "  playground: demo",
         "  directory: /pkg",
+    ]
+
+    assert mod.display_project_command_sections(
+        {
+            "install": {"server": "prod.example.com", "playground": "release"},
+            "watch": {"server": "dev.example.com", "playground": "testing", "startup": "install"},
+        }
+    ) == [
+        "install:",
+        "  server: prod.example.com",
+        "  playground: release",
+        "watch:",
+        "  server: dev.example.com",
+        "  playground: testing",
+        "  startup: install",
+    ]
+    assert mod.display_project_command_sections({"install": {}, "watch": {"server": "dev.example.com"}}) == [
+        "watch:",
+        "  server: dev.example.com",
     ]
 
     env = [{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}]
@@ -2321,9 +2824,13 @@ def test_create_and_config_remaining_branches(tmp_path, monkeypatch):
     monkeypatch.setattr(click, "prompt", lambda *args, **kwargs: next(prompt_values))
     assert mod.create.callback("demo2", None, None, None, None, None, None, str(tmp_path / "newdir")) == 0
 
-    config = (str(tmp_path / "cfg.yml"), [{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}])
+    config_path = tmp_path / "cfg.yml"
+    config_path.write_text(
+        yaml.safe_dump([{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}]),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(mod, "save_config", lambda **kwargs: True)
-    assert mod.remove.callback(config, "example.com") is None
+    assert mod.remove.callback(str(config_path), False, False, None, "example.com") is None
 
     new_file = (tmp_path / "no-add.yml").open("w", encoding="utf-8")
     monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: False)

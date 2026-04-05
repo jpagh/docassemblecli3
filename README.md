@@ -395,10 +395,25 @@ easy to use and will prompt you as necessary.
 
     Commands:
     add      Add a server to the config file.
-    display  List the servers in the config file.
+    show     Show the servers in the config file.
     new      Create a new config file.
     remove   Remove a server from the config file.
     test     Test the URL and API key.
+
+`da config add` now asks where to save the server entry when you do not say so
+on the command line. You can send it to the global config file or to the
+package-local project config. `da config show` and `da config remove` use
+the same target selection model. Any values you pass with CLI options, such as
+the API URL and key, package directory, Playground, or config target, skip the
+matching questions.
+
+When `da config add` targets the package-local project config, it can also ask
+whether the server you are adding should become the default for `install` or
+`watch`. You can also set those values directly with CLI options:
+`--install-default`, `--install-playground`, `--watch-default`,
+`--watch-playground`, and `--watch-startup install|none`. If you pass one of
+those local-only options without also choosing a config target, `da config add`
+automatically writes to the local project config.
 
 The `.docassemblecli` config file can store additional configuration for each server:
 
@@ -425,6 +440,13 @@ With this configuration:
 For per-package defaults, a package directory can also contain its own
 `.docassemblecli` file. `da install` and `da watch` will use it automatically
 unless you pass `--no-project-config`.
+
+The package-local file does not need a `servers:` key. Its `install.server` and
+`watch.server` values can refer to server names defined only in the global
+config file.
+
+Use `da config show --project-config` to display both the saved servers and the
+project-specific `install` and `watch` defaults from that file.
 
 For example:
 

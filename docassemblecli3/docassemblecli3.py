@@ -653,6 +653,21 @@ def display_servers(env: list = None) -> list[str]:
     return servers
 
 
+def display_project_command_sections(sections: dict[str, dict] | None) -> list[str]:
+    if not sections:
+        return []
+    lines = []
+    for command_name in ("install", "watch"):
+        section = sections.get(command_name, {}) or {}
+        if not section:
+            continue
+        lines.append(f"{command_name}:")
+        for key in ("server", "playground", "startup"):
+            if key in section:
+                lines.append(f"  {key}: {section[key]}")
+    return lines
+
+
 def select_server(
     cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "", **kwargs
 ) -> dict:
@@ -719,6 +734,143 @@ def save_config(cfg: str, env: list) -> bool:
     return True
 
 
+def load_or_create_project_config(directory: str) -> tuple[str, list, dict[str, dict]]:
+    config_path = os.path.abspath(os.path.join(directory, PROJECT_CONFIG))
+    if not os.path.isfile(config_path):
+        return config_path, [], {"install": {}, "watch": {}}
+    try:
+        with open(config_path, "r", encoding="utf-8") as fp:
+            data = yaml.load(fp, Loader=yaml.FullLoader)
+        env, sections = parse_project_command_config(data)
+    except Exception:
+        raise click.BadParameter("File is not a usable project config.", param_hint="--project-config")
+    return config_path, env, sections
+
+
+def save_project_config(config_path: str, env: list, sections: dict[str, dict]) -> bool:
+    try:
+        with open(config_path, "w", encoding="utf-8") as fp:
+            yaml.dump({"servers": env, "install": sections.get("install", {}), "watch": sections.get("watch", {})}, fp)
+    except Exception as err:
+        click.echo(f"Unable to save {config_path} file. {err.__class__.__name__}: {err}")
+        return False
+    return True
+
+
+def prompt_for_config_scope() -> str:
+    valid_choices = {
+        "g": "global",
+        "global": "global",
+        "l": "local",
+        "local": "local",
+    }
+    while True:
+        choice = (
+            click.prompt(
+                "Use the global config file or the local project config? ([g]lobal, [l]ocal)",
+                default="global",
+                show_default=True,
+            )
+            .strip()
+            .lower()
+        )
+        if choice in valid_choices:
+            return valid_choices[choice]
+        click.echo('Please enter "g", "global", "l", or "local".')
+
+
+def prompt_for_optional_playground() -> str | None:
+    playground = click.prompt(
+        "Default Playground project for this server (leave blank to skip; use 'default' for the default Playground)",
+        default="",
+        show_default=False,
+    ).strip()
+    return playground or None
+
+
+def prompt_for_optional_directory() -> str | None:
+    while True:
+        directory = click.prompt(
+            "Package directory to associate with this server (leave blank to skip)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not directory:
+            return None
+        try:
+            return validate_package_directory(None, None, directory)
+        except click.BadParameter as err:
+            click.echo(err.message)
+
+
+def prompt_for_command_default(command_name: str) -> bool:
+    return click.confirm(
+        f"Use this server as the default for {command_name} in the local project config?",
+        default=False,
+        show_default=True,
+    )
+
+
+def prompt_for_command_playground(command_name: str) -> str | None:
+    playground = click.prompt(
+        f"Default Playground project for {command_name} in this project (leave blank to skip; use 'default' for the default Playground)",
+        default="",
+        show_default=False,
+    ).strip()
+    return playground or None
+
+
+def prompt_for_watch_startup() -> str | None:
+    if click.confirm("Install once when watch starts for this project?", default=False, show_default=True):
+        return "install"
+    return None
+
+
+def resolve_project_config_directory(directory: str | None) -> str:
+    if directory is not None:
+        return validate_package_directory(None, None, directory)
+    suggested_directory = os.getcwd()
+    try:
+        return validate_package_directory(None, None, suggested_directory)
+    except click.BadParameter:
+        pass
+    while True:
+        chosen_directory = click.prompt(
+            "Package directory that should contain the local project config",
+            default=suggested_directory,
+            show_default=True,
+        ).strip()
+        try:
+            return validate_package_directory(None, None, chosen_directory)
+        except click.BadParameter as err:
+            click.echo(err.message)
+
+
+def resolve_config_target(
+    config_path: str | None,
+    use_project_config: bool,
+    use_global_config: bool,
+    directory: str | None,
+) -> tuple[str, str, list, dict[str, dict] | None]:
+    if use_project_config and (use_global_config or config_path):
+        raise click.BadParameter("Cannot be combined with global config options.", param_hint="--project-config")
+
+    if use_project_config:
+        target_scope = "local"
+    elif use_global_config or config_path:
+        target_scope = "global"
+    else:
+        target_scope = prompt_for_config_scope()
+
+    if target_scope == "local":
+        project_directory = resolve_project_config_directory(directory)
+        cfg, env, sections = load_or_create_project_config(project_directory)
+        return target_scope, cfg, env, sections
+
+    cfg, env = validate_and_load_or_create_config(None, None, config_path or DEFAULT_CONFIG)
+    return target_scope, cfg, env, None
+
+
 def prompt_for_api(retry: str = False, previous_url: str = None, previous_key: str = None) -> tuple[str, str]:
     if retry:
         if not click.confirm("Do you want to try another URL and API key?", default=True):
@@ -729,6 +881,14 @@ def prompt_for_api(retry: str = False, previous_url: str = None, previous_key: s
         default=previous_url,
     )
     apikey = click.prompt(f"""API key of admin or developer user on {apiurl}""", default=previous_key).strip()
+    return apiurl, apikey
+
+
+def ensure_api_credentials(apiurl: str = None, apikey: str = None) -> tuple[str, str]:
+    if not apiurl or not apikey:
+        apiurl, apikey = prompt_for_api()
+    while not test_apiurl_apikey(apiurl=apiurl, apikey=apikey):
+        apiurl, apikey = prompt_for_api(retry=True, previous_url=apiurl, previous_key=apikey)
     return apiurl, apikey
 
 
@@ -762,16 +922,47 @@ def add_server_to_env(
     apikey: str = None,
     directory: str = None,
     playground: str = None,
+    validate_api: bool = True,
 ):
-    if not apiurl or not apikey:
-        apiurl, apikey = prompt_for_api()
-    while not test_apiurl_apikey(apiurl=apiurl, apikey=apikey):
-        apiurl, apikey = prompt_for_api(retry=True, previous_url=apiurl, previous_key=apikey)
+    if validate_api:
+        apiurl, apikey = ensure_api_credentials(apiurl=apiurl, apikey=apikey)
     env = add_or_update_env(env=env, apiurl=apiurl, apikey=apikey, directory=directory, playground=playground)
     if cfg:
         if save_config(cfg, env):
             click.echo(f"""Configuration saved: {cfg}""")
     return env
+
+
+def apply_project_command_defaults(
+    sections: dict[str, dict],
+    server_name: str,
+    configure_install: bool,
+    install_playground: str | None,
+    configure_watch: bool,
+    watch_playground: str | None,
+    watch_startup: str | None,
+) -> dict[str, dict]:
+    updated_sections = {
+        "install": dict(sections.get("install", {})),
+        "watch": dict(sections.get("watch", {})),
+    }
+    if configure_install:
+        updated_sections["install"]["server"] = server_name
+        if install_playground:
+            updated_sections["install"]["playground"] = install_playground
+        else:
+            updated_sections["install"].pop("playground", None)
+    if configure_watch:
+        updated_sections["watch"]["server"] = server_name
+        if watch_playground:
+            updated_sections["watch"]["playground"] = watch_playground
+        else:
+            updated_sections["watch"].pop("playground", None)
+        if watch_startup == "install":
+            updated_sections["watch"]["startup"] = watch_startup
+        else:
+            updated_sections["watch"].pop("startup", None)
+    return updated_sections
 
 
 def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
@@ -1848,26 +2039,189 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
 
 
 @config.command(context_settings=CONTEXT_SETTINGS)
-@common_params_for_config
-@common_params_for_api
-@common_params_for_directory_and_playground
-def add(config, api, server, directory, playground):
+@click.option(
+    "--api",
+    "-a",
+    type=(APIURLType(), str),
+    default=(None, None),
+    help="URL of the docassemble server and API key of the user (admin or developer)",
+)
+@click.option("--config", "config_path", "-c", type=click.Path(), help="Specify the global config file to use")
+@click.option(
+    "--project-config", "use_project_config", is_flag=True, help="Add to the package-local .docassemblecli file"
+)
+@click.option("--global-config", "use_global_config", is_flag=True, help="Add to the global config file")
+@click.option("--directory", "-d", type=click.Path(), help="Associate the server with this package directory")
+@click.option(
+    "--playground",
+    "-p",
+    metavar="(PROJECT)",
+    is_flag=False,
+    flag_value="default",
+    help="Set the default Playground or specify the default Playground project.",
+)
+@click.option(
+    "--install-default/--no-install-default",
+    default=None,
+    help="In the local project config, set this server as the default for install.",
+)
+@click.option(
+    "--install-playground",
+    metavar="(PROJECT)",
+    is_flag=False,
+    flag_value="default",
+    default=None,
+    help="In the local project config, set the default Playground for install.",
+)
+@click.option(
+    "--watch-default/--no-watch-default",
+    default=None,
+    help="In the local project config, set this server as the default for watch.",
+)
+@click.option(
+    "--watch-playground",
+    metavar="(PROJECT)",
+    is_flag=False,
+    flag_value="default",
+    default=None,
+    help="In the local project config, set the default Playground for watch.",
+)
+@click.option(
+    "--watch-startup",
+    type=click.Choice(["install", "none"], case_sensitive=False),
+    default=None,
+    help="In the local project config, control whether watch installs once on startup.",
+)
+def add(
+    config_path,
+    api,
+    use_project_config,
+    use_global_config,
+    directory,
+    playground,
+    install_default,
+    install_playground,
+    watch_default,
+    watch_playground,
+    watch_startup,
+):
     """
     Add a server to the config file.
     """
     apiurl, apikey = api
-    cfg, env = config
-    add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey, directory=directory, playground=playground)
+    local_command_options_used = any(
+        value is not None
+        for value in (install_default, install_playground, watch_default, watch_playground, watch_startup)
+    )
+    if local_command_options_used and not (use_project_config or use_global_config or config_path):
+        use_project_config = True
+    target_scope, cfg, env, sections = resolve_config_target(
+        config_path=config_path,
+        use_project_config=use_project_config,
+        use_global_config=use_global_config,
+        directory=directory,
+    )
+    if install_default is False and install_playground is not None:
+        raise click.BadParameter(
+            "Cannot be combined with --no-install-default.",
+            param_hint="--install-playground",
+        )
+    if watch_default is False and (watch_playground is not None or watch_startup is not None):
+        raise click.BadParameter(
+            "Cannot be combined with --no-watch-default.",
+            param_hint="--watch-playground",
+        )
+    if target_scope != "local" and local_command_options_used:
+        raise click.BadParameter(
+            "Install/watch defaults can only be set in the package-local project config.",
+            param_hint="--project-config",
+        )
+
+    if target_scope == "local":
+        stored_directory = validate_package_directory(None, None, directory) if directory is not None else None
+    else:
+        stored_directory = (
+            validate_package_directory(None, None, directory)
+            if directory is not None
+            else prompt_for_optional_directory()
+        )
+
+    if playground is None:
+        playground = prompt_for_optional_playground()
+
+    if target_scope == "local":
+        configure_install = install_default if install_default is not None else bool(install_playground is not None)
+        if install_default is None and install_playground is None:
+            configure_install = prompt_for_command_default("install")
+        if configure_install and install_playground is None:
+            install_playground = prompt_for_command_playground("install")
+
+        configure_watch = (
+            watch_default
+            if watch_default is not None
+            else bool(watch_playground is not None or watch_startup is not None)
+        )
+        if watch_default is None and watch_playground is None and watch_startup is None:
+            configure_watch = prompt_for_command_default("watch")
+        if configure_watch and watch_playground is None:
+            watch_playground = prompt_for_command_playground("watch")
+        if configure_watch and watch_startup is None:
+            watch_startup = prompt_for_watch_startup()
+        if watch_startup == "none":
+            watch_startup = None
+
+    apiurl, apikey = ensure_api_credentials(apiurl=apiurl, apikey=apikey)
+    server_name = name_from_url(apiurl)
+
+    if target_scope == "local":
+        env = add_server_to_env(
+            cfg=None,
+            env=env,
+            apiurl=apiurl,
+            apikey=apikey,
+            directory=stored_directory,
+            playground=playground,
+            validate_api=False,
+        )
+        sections = apply_project_command_defaults(
+            sections=sections or {"install": {}, "watch": {}},
+            server_name=server_name,
+            configure_install=configure_install,
+            install_playground=install_playground,
+            configure_watch=configure_watch,
+            watch_playground=watch_playground,
+            watch_startup=watch_startup,
+        )
+        if save_project_config(cfg, env, sections):
+            click.echo(f"Configuration saved: {cfg}")
+    else:
+        add_server_to_env(
+            cfg=cfg,
+            env=env,
+            apiurl=apiurl,
+            apikey=apikey,
+            directory=stored_directory,
+            playground=playground,
+            validate_api=False,
+        )
 
 
 @config.command(context_settings=CONTEXT_SETTINGS)
-@common_params_for_config
+@click.option("--config", "config_path", "-c", type=click.Path(), help="Specify the global config file to use")
+@click.option("--project-config", "use_project_config", is_flag=True, help="Use the package-local .docassemblecli file")
+@click.option("--global-config", "use_global_config", is_flag=True, help="Use the global config file")
+@click.option("--directory", "-d", type=click.Path(), help="Package directory that contains the local project config")
 @click.option("--server", "-s", metavar="SERVER", help="Specify a server to remove from the config file")
-def remove(config, server):
+def remove(config_path, use_project_config, use_global_config, directory, server):
     """
     Remove a server from the config file.
     """
-    cfg, env = config
+    target_scope, cfg, env, sections = resolve_config_target(
+        config_path=config_path,
+        use_project_config=use_project_config,
+        use_global_config=use_global_config,
+        directory=directory,
+    )
     if not server:
         click.echo(f"""Servers in {cfg}:""")
         for item in display_servers(env=env):
@@ -1875,18 +2229,31 @@ def remove(config, server):
         server = click.prompt("Remove which server?")
     selected_server = select_server(cfg=cfg, env=env, server=server)
     env.remove(selected_server)
-    save_config(cfg=cfg, env=env)
+    if target_scope == "local":
+        save_project_config(cfg, env, sections or {"install": {}, "watch": {}})
+    else:
+        save_config(cfg=cfg, env=env)
     click.echo(f"""Server "{server}" has been removed from {cfg}.""")
 
 
-@config.command(context_settings=CONTEXT_SETTINGS)
-@common_params_for_config
-def display(config):
+@config.command(name="show", context_settings=CONTEXT_SETTINGS)
+@click.option("--config", "config_path", "-c", type=click.Path(), help="Specify the global config file to use")
+@click.option("--project-config", "use_project_config", is_flag=True, help="Use the package-local .docassemblecli file")
+@click.option("--global-config", "use_global_config", is_flag=True, help="Use the global config file")
+@click.option("--directory", "-d", type=click.Path(), help="Package directory that contains the local project config")
+def show(config_path, use_project_config, use_global_config, directory):
     """
-    List the servers in the config file.
+    Show the servers in the config file.
     """
-    _, env = config
+    _, _, env, sections = resolve_config_target(
+        config_path=config_path,
+        use_project_config=use_project_config,
+        use_global_config=use_global_config,
+        directory=directory,
+    )
     for item in display_servers(env=env):
+        click.echo("  " + item)
+    for item in display_project_command_sections(sections):
         click.echo("  " + item)
 
 
