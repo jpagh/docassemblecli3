@@ -370,9 +370,9 @@ be increased to more than the number of files that you will be monitoring. The
 easiest way to do that is to edit your ~/.profile file and add a line similar
 to:
 
-```bash
-ulimit -n 1024
-```
+    ```bash
+    ulimit -n 1024
+    ```
 
 This is an inherent problem with kqueue because it uses file descriptors to
 monitor files. That plus the enormous amount of bookkeeping that watchdog needs
@@ -423,16 +423,17 @@ The `.docassemblecli` config file can store additional configuration for each se
 
 For example, your `.docassemblecli` file might look like this:
 
-```yaml
-- apiurl: https://da.example.com
-  apikey: H3PWMKJOIVAXL4PWUJH3HG7EKPFU5GYT
-  name: da.example.com
-  playground: testing
-  directory: /path/to/docassemble-mypackage
-  startup: install
-```
+    ```yaml
+    - apiurl: https://da.example.com
+    apikey: H3PWMKJOIVAXL4PWUJH3HG7EKPFU5GYT
+    name: da.example.com
+    playground: testing
+    directory: /path/to/docassemble-mypackage
+    startup: install
+    ```
 
 With this configuration:
+
 - `da watch` in `/path/to/docassemble-mypackage` will automatically use this server
 - It will install to the "testing" playground project
 - It will install the package once when `watch` starts
@@ -454,26 +455,27 @@ project-specific `install` and `watch` defaults from that file.
 
 For example:
 
-```yaml
-servers:
-    - name: dev.example.com
-        apiurl: https://dev.example.com
-        apikey: DEVKEY
-    - name: prod.example.com
-        apiurl: https://prod.example.com
-        apikey: PRODKEY
+    ```yaml
+    servers:
+        - name: dev.example.com
+            apiurl: https://dev.example.com
+            apikey: DEVKEY
+        - name: prod.example.com
+            apiurl: https://prod.example.com
+            apikey: PRODKEY
 
-watch:
-    server: dev.example.com
-    playground: testing
-    startup: install
+    watch:
+        server: dev.example.com
+        playground: testing
+        startup: install
 
-install:
-    server: prod.example.com
-    playground: release
-```
+    install:
+        server: prod.example.com
+        playground: release
+    ```
 
 With this configuration:
+
 - `da watch` uses `dev.example.com` and the `testing` Playground
 - `da install` uses `prod.example.com` and the `release` Playground
 - If the local file is missing, both commands fall back to `~/.docassemblecli`
