@@ -445,6 +445,10 @@ The package-local file does not need a `servers:` key. Its `install.server` and
 `watch.server` values can refer to server names defined only in the global
 config file.
 
+If `install` or `watch` fails because one of those package-local server
+references can no longer be found, `da` will ask whether it should remove that
+stale server reference from the local project config.
+
 Use `da config show --project-config` to display both the saved servers and the
 project-specific `install` and `watch` defaults from that file.
 

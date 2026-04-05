@@ -624,6 +624,57 @@ def resolve_command_server(
     return selected_server
 
 
+def remove_server_references_from_project_config(directory: str, server_name: str) -> tuple[bool, str]:
+    config_path, env, sections = load_or_create_project_config(directory)
+    updated_env = [item for item in env if item.get("name") != server_name]
+    updated_sections = {
+        "install": dict(sections.get("install", {})),
+        "watch": dict(sections.get("watch", {})),
+    }
+
+    changed = len(updated_env) != len(env)
+    for command_name in ("install", "watch"):
+        if updated_sections[command_name].get("server") == server_name:
+            updated_sections[command_name].pop("server", None)
+            changed = True
+
+    if not changed:
+        return False, config_path
+    return save_project_config(config_path, updated_env, updated_sections), config_path
+
+
+def resolve_command_server_with_cleanup(
+    command_name: str,
+    directory: str,
+    config: tuple[str | None, list],
+    api: tuple[str | None, str | None],
+    server: str,
+    project_config: bool,
+) -> dict:
+    try:
+        return resolve_command_server(command_name, directory, config, api, server, project_config)
+    except click.BadParameter as err:
+        if not project_config or server:
+            raise
+        project_config_path = os.path.abspath(os.path.join(directory, PROJECT_CONFIG))
+        if not os.path.isfile(project_config_path):
+            raise
+        project_cfg, _, command_config = load_project_command_config(directory, command_name)
+        configured_server = command_config.get("server", "")
+        if getattr(err, "message", "") != f'Server "{configured_server}" was not found.':
+            raise
+        if not click.confirm(
+            f'Server "{configured_server}" from the local project config was not found. Remove it from {project_cfg}?',
+            default=False,
+        ):
+            raise
+        removed, config_path = remove_server_references_from_project_config(directory, configured_server)
+        if removed:
+            click.echo(f'Server "{configured_server}" has been removed from {config_path}.')
+            return resolve_command_server(command_name, directory, config, api, server, project_config)
+        raise
+
+
 # -----------------------------------------------------------------------------
 # utility functions
 # -----------------------------------------------------------------------------
@@ -1355,7 +1406,7 @@ def install(directory, config, project_config, api, server, playground, restart,
 
     `install` tries to get API info from the --api option first (if used), then from the first server listed in the ~/.docassemblecli file if it exists (unless the --config option is used), then it tries to use environmental variables, and finally it prompts the user directly.
     """
-    selected_server = resolve_command_server("install", directory, config, api, server, project_config)
+    selected_server = resolve_command_server_with_cleanup("install", directory, config, api, server, project_config)
     if project_config and not playground and "playground" in selected_server:
         playground = selected_server["playground"]
     click.echo(f"""Server: {selected_server["name"]}""")
@@ -1649,7 +1700,7 @@ def watch(directory, config, project_config, api, server, playground, restart, b
 
     If the --directory option is not specified, `watch` will look for a directory entry in the config file. The corresponding server entry will be selected automatically if the "directory" key in the config file matches the directory being watched. If a match is found, the "playground" key in the config file will be used if it exists and if no --playground option was specified.
     """
-    selected_server = resolve_command_server("watch", directory, config, api, server, project_config)
+    selected_server = resolve_command_server_with_cleanup("watch", directory, config, api, server, project_config)
     restart_param = restart
     scan_directory(directory)
     global FULL_INSTALL_DONE, LAST_MODIFIED

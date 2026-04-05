@@ -276,6 +276,127 @@ def test_project_command_config_helpers(tmp_path):
     }
 
 
+def test_resolve_command_server_with_cleanup_removes_stale_project_reference(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "install": {"server": "missing.example.com", "playground": "release"},
+                "watch": {"server": "missing.example.com", "startup": "install"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
+
+    selected_server = mod.resolve_command_server_with_cleanup(
+        "install",
+        str(package_dir),
+        ("cfg", [{"name": "fallback.example.com", "apiurl": "https://fallback.example.com", "apikey": "key"}]),
+        (None, None),
+        "",
+        True,
+    )
+
+    assert selected_server == {
+        "name": "fallback.example.com",
+        "apiurl": "https://fallback.example.com",
+        "apikey": "key",
+        "playground": "release",
+    }
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["install"] == {"playground": "release"}
+    assert project_data["watch"] == {"startup": "install"}
+
+
+def test_resolve_command_server_with_cleanup_preserves_failure_when_declined(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "install": {"server": "missing.example.com", "playground": "release"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: False)
+
+    with pytest.raises(click.BadParameter, match='Server "missing.example.com" was not found.'):
+        mod.resolve_command_server_with_cleanup(
+            "install",
+            str(package_dir),
+            ("cfg", [{"name": "fallback.example.com", "apiurl": "https://fallback.example.com", "apikey": "key"}]),
+            (None, None),
+            "",
+            True,
+        )
+
+
+def test_remove_server_references_from_project_config_noop(tmp_path):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump(
+            {
+                "install": {"server": "other.example.com", "playground": "release"},
+                "watch": {"server": "different.example.com", "startup": "install"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    removed, config_path = mod.remove_server_references_from_project_config(str(package_dir), "missing.example.com")
+
+    assert removed is False
+    assert config_path == str((package_dir / mod.PROJECT_CONFIG).resolve())
+
+
+def test_resolve_command_server_with_cleanup_reraises_non_cleanup_cases(tmp_path, monkeypatch):
+    missing_error = click.BadParameter('Server "missing.example.com" was not found.', param_hint="--server")
+    monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: (_ for _ in ()).throw(missing_error))
+
+    with pytest.raises(click.BadParameter, match='Server "missing.example.com" was not found.'):
+        mod.resolve_command_server_with_cleanup("install", str(tmp_path), ("cfg", []), (None, None), "explicit", True)
+
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    with pytest.raises(click.BadParameter, match='Server "missing.example.com" was not found.'):
+        mod.resolve_command_server_with_cleanup("install", str(package_dir), ("cfg", []), (None, None), "", True)
+
+    (package_dir / mod.PROJECT_CONFIG).write_text(
+        yaml.safe_dump({"install": {"server": "missing.example.com"}}),
+        encoding="utf-8",
+    )
+    other_error = click.BadParameter("other error", param_hint="--server")
+    monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: (_ for _ in ()).throw(other_error))
+    with pytest.raises(click.BadParameter, match="other error"):
+        mod.resolve_command_server_with_cleanup("install", str(package_dir), ("cfg", []), (None, None), "", True)
+
+
+def test_resolve_command_server_with_cleanup_reraises_when_cleanup_fails(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    config_path = package_dir / mod.PROJECT_CONFIG
+    config_path.write_text(
+        yaml.safe_dump({"install": {"server": "missing.example.com"}}),
+        encoding="utf-8",
+    )
+
+    missing_error = click.BadParameter('Server "missing.example.com" was not found.', param_hint="--server")
+    monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: (_ for _ in ()).throw(missing_error))
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        mod,
+        "remove_server_references_from_project_config",
+        lambda directory, server_name: (False, str(config_path.resolve())),
+    )
+
+    with pytest.raises(click.BadParameter, match='Server "missing.example.com" was not found.'):
+        mod.resolve_command_server_with_cleanup("install", str(package_dir), ("cfg", []), (None, None), "", True)
+
+
 def test_project_config_load_save_error_paths(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
