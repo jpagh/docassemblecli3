@@ -604,6 +604,7 @@ def test_display_select_and_env_helpers(monkeypatch, capsys):
     ]
     assert mod.display_servers(env) == [
         "example.com (default)",
+        "  apiurl: https://example.com",
         "  playground: demo",
         "  directory: pkg",
     ]
@@ -1787,13 +1788,14 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
     servers = mod.display_servers(
         [
             {"name": "first", "startup": "install"},
-            {"name": "second", "playground": "demo", "directory": "/pkg"},
+            {"name": "second", "apiurl": "https://second.example.com", "playground": "demo", "directory": "/pkg"},
         ]
     )
     assert servers == [
         "first (default)",
         "  startup: install",
         "second",
+        "  apiurl: https://second.example.com",
         "  playground: demo",
         "  directory: /pkg",
     ]

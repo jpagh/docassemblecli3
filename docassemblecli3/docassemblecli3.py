@@ -691,10 +691,13 @@ def display_servers(env: list = None) -> list[str]:
         return ["No servers found."]
     servers = []
     for idx, item in enumerate(env):
+        server_label = item.get("name") or item.get("apiurl", "")
         if idx:
-            servers.append(item.get("name", ""))
+            servers.append(server_label)
         else:
-            servers.append(item.get("name", "") + " (default)")
+            servers.append(server_label + " (default)")
+        if "apiurl" in item:
+            servers.append(f"""  apiurl: {item["apiurl"]}""")
         if "playground" in item:
             servers.append(f"""  playground: {item["playground"]}""")
         if "directory" in item:
