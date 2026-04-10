@@ -2508,7 +2508,7 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         lambda url, *args, **kwargs: (
             DummyResponse(status_code=200, json_data=[{"name": "docassemble.base", "version": "1.5.3"}])
             if url.endswith("/api/package")
-            else DummyResponse(status_code=200, contains=[])
+            else DummyResponse(status_code=200, json_data=[])
         ),
     )
     monkeypatch.setattr(
@@ -2543,7 +2543,7 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         lambda url, *args, **kwargs: (
             DummyResponse(status_code=200, json_data=[{"name": "docassemble.base", "version": "1.5.3"}])
             if url.endswith("/api/package")
-            else DummyResponse(status_code=200, contains=["demo"])
+            else DummyResponse(status_code=200, json_data=["demo"])
         ),
     )
     monkeypatch.setattr(
@@ -2611,6 +2611,135 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
     assert mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto") == (
         "playground_install POST returned 500: bad install"
     )
+
+
+def test_package_installer_playground_requests_have_timeouts_and_progress(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {"docassemble/test/module.py": "value = 1\n"},
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+
+    requests_seen = []
+
+    def fake_get(url, *args, **kwargs):
+        requests_seen.append(("get", url, kwargs.get("timeout")))
+        if url.endswith("/api/package"):
+            return DummyResponse(status_code=200, json_data=[{"name": "docassemble.base", "version": "1.5.3"}])
+        if url.endswith("/api/playground/project"):
+            return DummyResponse(status_code=200, json_data=[])
+        raise AssertionError(url)
+
+    def fake_post(url, *args, **kwargs):
+        requests_seen.append(("post", url, kwargs.get("timeout")))
+        if url.endswith("/api/playground/project"):
+            return DummyResponse(status_code=204)
+        if url.endswith("/api/playground_install"):
+            return DummyResponse(status_code=204)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto") == 0
+
+    output = capsys.readouterr().out
+    assert "Checking Playground project..." in output
+    assert 'Creating Playground project "demo"...' in output
+    assert "Uploading package to Playground..." in output
+    assert ("get", "https://example.com/api/package", 600) in requests_seen
+    assert ("get", "https://example.com/api/playground/project", 600) in requests_seen
+    assert ("post", "https://example.com/api/playground/project", 600) in requests_seen
+    assert ("post", "https://example.com/api/playground_install", 600) in requests_seen
+
+
+def test_package_installer_skips_project_create_for_existing_playground(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {"docassemble/test/module.py": "value = 1\n"},
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+
+    requests_seen = []
+
+    def fake_get(url, *args, **kwargs):
+        requests_seen.append(("get", url))
+        if url.endswith("/api/package"):
+            return DummyResponse(status_code=200, json_data=[{"name": "docassemble.base", "version": "1.5.3"}])
+        if url.endswith("/api/playground/project"):
+            return DummyResponse(status_code=200, json_data=["demo"])
+        raise AssertionError(url)
+
+    def fake_post(url, *args, **kwargs):
+        requests_seen.append(("post", url))
+        if url.endswith("/api/playground_install"):
+            return DummyResponse(status_code=204)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto") == 0
+
+    output = capsys.readouterr().out
+    assert "Checking Playground project..." in output
+    assert 'Creating Playground project "demo"...' not in output
+    assert ("post", "https://example.com/api/playground/project") not in requests_seen
+    assert ("post", "https://example.com/api/playground_install") in requests_seen
+
+
+def test_http_get_uses_fresh_niquests_session(monkeypatch):
+    calls = []
+
+    def fake_native_get(url, **kwargs):
+        raise AssertionError("session transport should be used")
+
+    fake_native_get.__module__ = "niquests.api"
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def __enter__(self):
+            calls.append(("enter", None))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("exit", exc_type))
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(("get", url, kwargs))
+            return DummyResponse(status_code=200, json_data={"ok": True})
+
+    monkeypatch.setattr(mod.requests, "get", fake_native_get)
+    monkeypatch.setattr(mod.requests, "Session", FakeSession)
+
+    response = mod.http_get("https://example.com/api/package", timeout=12)
+
+    assert response.status_code == 200
+    assert calls[0] == ("init", {"disable_http3": True})
+    assert calls[2] == ("get", "https://example.com/api/package", {"timeout": 12})
 
 
 def test_watch_package_location_and_exception(tmp_path, monkeypatch):
@@ -2797,7 +2926,7 @@ def test_package_installer_setup_cfg_only_and_nonmatching_dependencies(tmp_path,
 
     def fake_get(url, *args, **kwargs):
         if url.endswith("/api/playground/project"):
-            return DummyResponse(status_code=200, contains=["default"])
+            return DummyResponse(status_code=200, json_data=["default"])
         return DummyResponse(
             status_code=200,
             json_data=[

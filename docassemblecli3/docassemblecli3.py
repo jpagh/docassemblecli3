@@ -427,6 +427,37 @@ def show_dry_run_playground_upload(playground: str, uploads: dict[str, list[str]
         show_dry_run_file_hint(show_files)
 
 
+def playground_project_exists(project_data, playground: str) -> bool:
+    if isinstance(project_data, list):
+        for item in project_data:
+            if item == playground:
+                return True
+            if isinstance(item, dict) and playground in (item.get("name"), item.get("project")):
+                return True
+        return False
+    if isinstance(project_data, dict):
+        for key in ("projects", "items", "results"):
+            if key in project_data:
+                return playground_project_exists(project_data[key], playground)
+    return False
+
+
+def http_request(method_name: str, url: str, **kwargs):
+    request_method = getattr(requests, method_name)
+    if getattr(request_method, "__module__", "").startswith("niquests"):
+        with requests.Session(disable_http3=True) as session:
+            return getattr(session, method_name)(url, **kwargs)
+    return request_method(url, **kwargs)
+
+
+def http_get(url: str, **kwargs):
+    return http_request("get", url, **kwargs)
+
+
+def http_post(url: str, **kwargs):
+    return http_request("post", url, **kwargs)
+
+
 def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
     deduplicated = {}
     for file_path, event_types in file_events.items():
@@ -487,7 +518,7 @@ def upload_playground_files(
                 post_data["project"] = playground
             try:
                 with open(file_path, "rb") as fp:
-                    response = requests.post(
+                    response = http_post(
                         apiurl + "/api/playground",
                         data=post_data,
                         files={"file": fp},
@@ -949,7 +980,7 @@ def ensure_api_credentials(apiurl: str = None, apikey: str = None) -> tuple[str,
 def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
     click.echo("Testing the URL and API key...")
     try:
-        api_test = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
+        api_test = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey})
         if api_test.status_code != 200:
             if api_test.status_code == 403:
                 click.secho(
@@ -1032,7 +1063,7 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
             else:
                 full_url = apiurl + "/api/package_update_status"
             try:
-                r = requests.get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
+                r = http_get(full_url, params={"task_id": task_id}, headers={"X-API-Key": apikey}, timeout=600)
             except requests.exceptions.RequestException:
                 time.sleep(1)
                 tries += 1
@@ -1191,7 +1222,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
         should_restart = True
     elif len(dependencies) > 0 or this_package_name:
         try:
-            r = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
+            r = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
         except Exception as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -1239,7 +1270,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
     if should_restart:
         if not dry_run:
             try:
-                server_packages = requests.get(apiurl + "/api/package", headers={"X-API-Key": apikey})
+                server_packages = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
                 if server_packages.status_code != 200:
                     if server_packages.status_code == 403:
                         click.secho("""\nThe API KEY is invalid.""", fg="red")
@@ -1270,11 +1301,22 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
         if playground != "default":
             data["project"] = playground
         project_endpoint = apiurl + "/api/playground/project"
-        project_list = requests.get(project_endpoint, headers={"X-API-Key": apikey})
+        click.secho("Checking Playground project...", fg="cyan")
+        project_list = http_get(project_endpoint, headers={"X-API-Key": apikey}, timeout=600)
         if project_list.status_code == 200:
-            if playground not in project_list:
+            try:
+                existing_projects = project_list.json()
+            except Exception:
+                return "playground list of projects GET returned invalid JSON: " + project_list.text
+            if not playground_project_exists(existing_projects, playground):
                 try:
-                    requests.post(project_endpoint, data={"project": playground}, headers={"X-API-Key": apikey})
+                    click.secho(f'''Creating Playground project "{playground}"...''', fg="cyan")
+                    http_post(
+                        project_endpoint,
+                        data={"project": playground},
+                        headers={"X-API-Key": apikey},
+                        timeout=600,
+                    )
                 except Exception:
                     return "create project POST returned " + project_list.text
         else:
@@ -1283,7 +1325,8 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                 "playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text
             )
         try:
-            r = requests.post(
+            click.secho("Uploading package to Playground...", fg="cyan")
+            r = http_post(
                 apiurl + "/api/playground_install",
                 data=data,
                 files={"file": archive},
@@ -1301,7 +1344,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             if "project" not in data or error_message != "Invalid project.":
                 return "playground_install POST returned " + str(r.status_code) + ": " + r.text
             try:
-                r = requests.post(
+                r = http_post(
                     apiurl + "/api/playground/project",
                     data={"project": data["project"]},
                     headers={"X-API-Key": apikey},
@@ -1319,7 +1362,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                 )
             archive.seek(0)
             try:
-                r = requests.post(
+                r = http_post(
                     apiurl + "/api/playground_install",
                     data=data,
                     files={"file": archive},
@@ -1356,7 +1399,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             return 1
     else:
         try:
-            r = requests.post(
+            r = http_post(
                 apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey}, timeout=600
             )
         except Exception as err:
@@ -1376,7 +1419,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             announce_installed()
         if not should_restart:
             try:
-                r = requests.post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
+                r = http_post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
             except Exception as err:
                 click.secho(f"""\n{err.__class__.__name__}{BELL}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")

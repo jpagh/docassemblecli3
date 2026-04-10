@@ -10,7 +10,13 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ## [Unreleased]
 
-- No unreleased changes yet.
+### Fixed
+
+- Fixed Playground installs and `watch` startup installs hanging behind some
+  HTTP/3 reverse proxies by using fresh `niquests` sessions with HTTP/3
+  disabled for CLI HTTP requests.
+- Fixed Playground project existence checks to read the API's JSON response
+  instead of testing membership on the raw HTTP response object.
 
 ## [26.4.1] - 2026-04-04
 
