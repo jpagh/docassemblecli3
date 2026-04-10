@@ -182,7 +182,7 @@ wheels = [
 
 [[package]]
 name = "docassemblecli3"
-version = "26.4.1"
+version = "26.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
