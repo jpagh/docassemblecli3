@@ -8,7 +8,7 @@ This changelog was reconstructed from the repository's git tags and commit
 history on 2026-04-10. Early releases, especially before 0.2.1, include
 summaries inferred from diffs where commit messages were not descriptive.
 
-## [Unreleased]
+## [26.4.2] - 2026-04-10
 
 ### Fixed
 
