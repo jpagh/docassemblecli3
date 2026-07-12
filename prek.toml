@@ -15,7 +15,7 @@
         { id = "ruff-format", types_or = ["pyi", "python"] },
     ]
     repo = "https://github.com/astral-sh/ruff-pre-commit"
-    rev = "v0.15.7" # Ruff version.
+    rev = "v0.15.21" # Ruff version.
 
 [[repos]]
     hooks = [
