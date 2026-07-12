@@ -23,7 +23,7 @@
     name = "docassemblecli3"
     readme = "README.md"
     requires-python = ">= 3.12"
-    version = "26.4.2"
+    version = "26.7.0"
 
     [project.urls]
         "Bug Tracker" = "https://github.com/jpagh/docassemblecli3/issues"
