@@ -57,6 +57,11 @@
 [tool.ruff]
     line-length = 120
 
+    [tool.ruff.lint]
+        extend-select = [
+            "I",
+        ]
+
 [dependency-groups]
     dev = [
         "pytest-cov>=7.1.0",
