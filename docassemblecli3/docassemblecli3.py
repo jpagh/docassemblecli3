@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import zipfile
 from functools import wraps
 from urllib.parse import urlparse
@@ -16,11 +17,10 @@ import click
 import gitmatch
 import niquests as requests
 import yaml
-from packaging.licenses import LICENSES as SPDX_LICENSES
 from packaging import version as packaging_version
+from packaging.licenses import LICENSES as SPDX_LICENSES
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-import tomllib
 
 global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
@@ -1710,7 +1710,7 @@ class WatchHandler(FileSystemEventHandler):
             event_bucket[event_type] = True
             LAST_MODIFIED["files"][event_path] = event_bucket
         LAST_MODIFIED["time"] = time.time()
-        if event_path.endswith(".py"):
+        if event_path.endswith(".py") and event_path.startswith(os.path.join(self.directory, "docassemble") + os.sep):
             LAST_MODIFIED["restart"] = True
 
 

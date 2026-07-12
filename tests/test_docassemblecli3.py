@@ -1106,7 +1106,9 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
 
     monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
     monkeypatch.setattr(mod.time, "time", lambda: 123)
-    event = SimpleNamespace(is_directory=False, event_type="created", src_path=str(package_dir / "module.py"))
+    event = SimpleNamespace(
+        is_directory=False, event_type="created", src_path=str(package_dir / "docassemble" / "module.py")
+    )
     handler.on_any_event(event)
     assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"created": True}}, "restart": True}
 
