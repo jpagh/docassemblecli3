@@ -8,13 +8,33 @@ This changelog was reconstructed from the repository's git tags and commit
 history on 2026-04-10. Early releases, especially before 0.2.1, include
 summaries inferred from diffs where commit messages were not descriptive.
 
+## Unreleased
+
+### Changed
+
+- Performance improvements to the `watch` command's file monitoring. Saving a
+  file repeatedly in quick succession (for example with auto-save or
+  format-on-save) is now handled more efficiently, and fewer files are
+  re-examined when nothing meaningful has changed.
+
+### Fixed
+
+- Improved error handling for invalid project configuration files.
+
+## [26.7.0] - 2026-07-11
+
+### Fixed
+
+- No longer restarts the server when Python files outside of the docassemble
+  directory change (specifically to avoid tests causing restarts).
+
 ## [26.4.2] - 2026-04-10
 
 ### Fixed
 
 - Fixed Playground installs and `watch` startup installs hanging behind some
-  HTTP/3 reverse proxies by using fresh `niquests` sessions with HTTP/3
-  disabled for CLI HTTP requests.
+  HTTP/3 reverse proxies by using fresh `niquests` sessions with HTTP/3 disabled
+  for CLI HTTP requests.
 - Fixed Playground project existence checks to read the API's JSON response
   instead of testing membership on the raw HTTP response object.
 
@@ -200,10 +220,10 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Added
 
-- Added checksum-based directory scanning to seed watch state before file
-  events arrive.
-- Expanded the default ignore list to cover additional temporary and editor
-  lock files.
+- Added checksum-based directory scanning to seed watch state before file events
+  arrive.
+- Expanded the default ignore list to cover additional temporary and editor lock
+  files.
 
 ### Changed
 
@@ -242,8 +262,8 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Fixed
 
-- Fixed a regression from 0.0.3 that raised an exception when the server did
-  not need to restart.
+- Fixed a regression from 0.0.3 that raised an exception when the server did not
+  need to restart.
 - Corrected GitHub Actions configuration for trusted PyPI publishing.
 
 ## [0.0.3] - 2024-08-19

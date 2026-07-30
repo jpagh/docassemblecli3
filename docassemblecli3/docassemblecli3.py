@@ -1,6 +1,5 @@
 import configparser
 import datetime
-import hashlib
 import os
 import re
 import stat
@@ -16,56 +15,31 @@ from urllib.parse import urlparse
 import click
 import gitmatch
 import niquests as requests
+import xxhash
 import yaml
 from packaging import version as packaging_version
 from packaging.licenses import LICENSES as SPDX_LICENSES
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-global DEFAULT_CONFIG
 DEFAULT_CONFIG = os.path.join(os.path.expanduser("~"), ".docassemblecli")
-
-global PROJECT_CONFIG
 PROJECT_CONFIG = ".docassemblecli"
-
-global LAST_MODIFIED
 LAST_MODIFIED = {
     "time": 0,
     "files": {},
     "restart": False,
 }
-
-global FULL_INSTALL_DONE
 FULL_INSTALL_DONE = False
-
-global FILE_CHECKSUMS
 FILE_CHECKSUMS = {}
-
-global DEBUG
 DEBUG = False
-
-global BELL
 BELL = "\a"
-
-global EXCLUDED_DIRECTORIES
 EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
-
-global GITMATCH_COMPILED
-GITMATCH_COMPILED = None
-
-global GITMATCH_DIRECTORY
-GITMATCH_DIRECTORY = None
-
-global GITIGNORE_MTIME
-GITIGNORE_MTIME = None
-
-global WATCH_IGNORE_MTIME
 WATCH_IGNORE_MTIME = None
-
-global WATCH_SETTLE_DELAY
 WATCH_SETTLE_DELAY = 0.6
-
-global GITIGNORE
+WATCH_IGNORE_FILE = ".dawatchignore"
+GITMATCH_COMPILED = None
+GITMATCH_DIRECTORY = None
+GITIGNORE_MTIME = None
 GITIGNORE = """\
 __pycache__/
 *.py[cod]
@@ -117,16 +91,13 @@ wheels/
 share/python-wheels/
 """
 
-global WATCH_IGNORE_FILE
-WATCH_IGNORE_FILE = ".dawatchignore"
-
 
 # -----------------------------------------------------------------------------
 # click
 # -----------------------------------------------------------------------------
 
 
-CONTEXT_SETTINGS = dict(help_option_names=["--help", "-h"])
+CONTEXT_SETTINGS = {"help_option_names": ["--help", "-h"]}
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -163,7 +134,6 @@ def config():
     """
     Manage servers in a docassemblecli config file.
     """
-    pass
 
 
 def common_params_for_api(func):
@@ -470,6 +440,33 @@ def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
     return deduplicated
 
 
+def filter_changed_files(file_events: dict) -> dict[str, dict]:
+    """Filter file events to those whose content actually changed.
+
+    Updates FILE_CHECKSUMS with fresh (mtime, size, checksum) tuples for kept
+    files. Deletion events pass through unchanged. Events whose file disappears
+    or whose checksum matches the cached value are dropped.
+    """
+    filtered = {}
+    for path, bucket in file_events.items():
+        if bucket.get("deleted"):
+            filtered[path] = bucket
+            continue
+        new_checksum = calculate_checksum(path)
+        if not new_checksum:
+            continue
+        cached = FILE_CHECKSUMS.get(path)
+        if cached and cached[2] == new_checksum:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        FILE_CHECKSUMS[path] = (st.st_mtime, st.st_size, new_checksum)
+        filtered[path] = bucket
+    return filtered
+
+
 def classify_playground_paths(changed_files: dict[str, str]) -> dict[str, list[str]] | None:
     uploads = {"questions": [], "sources": [], "static": [], "templates": [], "modules": []}
     for file_path, event_type in changed_files.items():
@@ -567,7 +564,7 @@ def validate_and_load_or_create_config(ctx, param, config: str) -> tuple[str, li
         with open(config, "r", encoding="utf-8") as fp:
             env = yaml.load(fp, Loader=yaml.FullLoader)
             if not isinstance(env, list):
-                raise Exception
+                raise TypeError
     except Exception:
         raise click.BadParameter("File is not a usable docassemblecli config.")
     return (config, env)
@@ -717,7 +714,7 @@ def name_from_url(url: str) -> str:
     return urlparse(url).netloc
 
 
-def display_servers(env: list = None) -> list[str]:
+def display_servers(env: list | None = None) -> list[str]:
     if not env:
         return ["No servers found."]
     servers = []
@@ -754,7 +751,12 @@ def display_project_command_sections(sections: dict[str, dict] | None) -> list[s
 
 
 def select_server(
-    cfg: str = None, env: list = None, apiurl: str = None, apikey: str = None, server: str = "", **kwargs
+    cfg: str | None = None,
+    env: list | None = None,
+    apiurl: str | None = None,
+    apikey: str | None = None,
+    server: str | None = "",
+    **kwargs,
 ) -> dict:
     if apiurl and apikey:
         return add_server_to_env(cfg=cfg, env=env, apiurl=apiurl, apikey=apikey)[-1]
@@ -781,7 +783,7 @@ def select_server(
 
 
 def add_or_update_env(
-    env: list = None, apiurl: str = "", apikey: str = "", directory: str = "", playground: str = ""
+    env: list | None = None, apiurl: str = "", apikey: str = "", directory: str = "", playground: str = ""
 ) -> list:
     if not env:
         env: list = []
@@ -956,10 +958,13 @@ def resolve_config_target(
     return target_scope, cfg, env, None
 
 
-def prompt_for_api(retry: str = False, previous_url: str = None, previous_key: str = None) -> tuple[str, str]:
-    if retry:
-        if not click.confirm("Do you want to try another URL and API key?", default=True):
-            raise click.Abort()
+def prompt_for_api(
+    retry: str | None = False,
+    previous_url: str | None = None,
+    previous_key: str | None = None,
+) -> tuple[str, str]:
+    if retry and not click.confirm("Do you want to try another URL and API key?", default=True):
+        raise click.Abort()
     apiurl = click.prompt(
         """Base URL of your docassemble server (e.g., https://da.example.com)""",
         type=APIURLType(),
@@ -969,7 +974,10 @@ def prompt_for_api(retry: str = False, previous_url: str = None, previous_key: s
     return apiurl, apikey
 
 
-def ensure_api_credentials(apiurl: str = None, apikey: str = None) -> tuple[str, str]:
+def ensure_api_credentials(
+    apiurl: str | None = None,
+    apikey: str | None = None,
+) -> tuple[str, str]:
     if not apiurl or not apikey:
         apiurl, apikey = prompt_for_api()
     while not test_apiurl_apikey(apiurl=apiurl, apikey=apikey):
@@ -1001,20 +1009,19 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
 
 
 def add_server_to_env(
-    cfg: str = None,
-    env: list = None,
-    apiurl: str = None,
-    apikey: str = None,
-    directory: str = None,
-    playground: str = None,
+    cfg: str | None = None,
+    env: list | None = None,
+    apiurl: str | None = None,
+    apikey: str | None = None,
+    directory: str | None = None,
+    playground: str | None = None,
     validate_api: bool = True,
 ):
     if validate_api:
         apiurl, apikey = ensure_api_credentials(apiurl=apiurl, apikey=apikey)
     env = add_or_update_env(env=env, apiurl=apiurl, apikey=apikey, directory=directory, playground=playground)
-    if cfg:
-        if save_config(cfg, env):
-            click.echo(f"""Configuration saved: {cfg}""")
+    if cfg and save_config(cfg, env):
+        click.echo(f"""Configuration saved: {cfg}""")
     return env
 
 
@@ -1162,7 +1169,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True,
+            text=True,
             cwd=directory,
             check=False,
         )
@@ -1267,23 +1274,22 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
     else:
         should_restart = True
     data = {}
-    if should_restart:
-        if not dry_run:
-            try:
-                server_packages = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
-                if server_packages.status_code != 200:
-                    if server_packages.status_code == 403:
-                        click.secho("""\nThe API KEY is invalid.""", fg="red")
-                    server_packages.raise_for_status()
-                else:
-                    installed_packages = server_packages.json()
-                    for package in installed_packages:
-                        if package.get("name", "") == "docassemble.base":
-                            server_version_da = package.get("version", "0")
-            except Exception as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
-            click.secho("Server will restart.", fg="yellow")
+    if should_restart and not dry_run:
+        try:
+            server_packages = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
+            if server_packages.status_code != 200:
+                if server_packages.status_code == 403:
+                    click.secho("""\nThe API KEY is invalid.""", fg="red")
+                server_packages.raise_for_status()
+            else:
+                installed_packages = server_packages.json()
+                for package in installed_packages:
+                    if package.get("name", "") == "docassemble.base":
+                        server_version_da = package.get("version", "0")
+        except Exception as err:
+            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+            raise click.ClickException(f"""{err}\n""")
+        click.secho("Server will restart.", fg="yellow")
     if not should_restart:
         server_version_da = "norestart"
         data["restart"] = "0"
@@ -1543,8 +1549,7 @@ def download(config, api, server, playground, overwrite, package):
         raise click.ClickException(f"""{err}\n""")
 
     with open(archive.name, "wb") as fp:
-        for chunk in response.iter_content(8192):
-            fp.write(chunk)
+        fp.writelines(response.iter_content(8192))
 
     with zipfile.ZipFile(archive.name, mode="r") as zf:
         if not overwrite:
@@ -1600,35 +1605,40 @@ def uninstall(config, api, server, restart, package):
 
 
 # -----------------------------------------------------------------------------
-# watchdog & hashlib
+# watchdog & xxhash
 # -----------------------------------------------------------------------------
 
 
 def calculate_checksum(filepath: str) -> str:
-    hash_md5 = hashlib.md5()
+    hasher = xxhash.xxh64()
     try:
         with open(filepath, "rb") as f:
             while chunk := f.read(4096):
-                hash_md5.update(chunk)
+                hasher.update(chunk)
     except FileNotFoundError:
         return ""
     except Exception as e:
         click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
-    return hash_md5.hexdigest()
+    return hasher.hexdigest()
 
 
 def scan_directory(directory):
     if DEBUG:
         click.secho("Scanning files...", fg="cyan")
-    global FILE_CHECKSUMS
     for current_directory, subdirectories, files in os.walk(directory):
         excluded_directories = EXCLUDED_DIRECTORIES
         subdirectories[:] = [d for d in subdirectories if d not in excluded_directories]
         for file in files:
             filepath = os.path.join(current_directory, file)
             if not matches_ignore_patterns(path=filepath, directory=directory):
-                FILE_CHECKSUMS[filepath] = calculate_checksum(filepath)
+                try:
+                    st = os.stat(filepath)
+                except OSError:
+                    continue
+                checksum = calculate_checksum(filepath)
+                if checksum:
+                    FILE_CHECKSUMS[filepath] = (st.st_mtime, st.st_size, checksum)
     if DEBUG:
         click.secho("Scanning complete.", fg="green")
 
@@ -1679,27 +1689,29 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
 class WatchHandler(FileSystemEventHandler):
     def __init__(self, *args, **kwargs):
         self.directory = kwargs.pop("directory")
-        super(WatchHandler, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def on_any_event(self, event):
-        global LAST_MODIFIED, FILE_CHECKSUMS
         event_type = getattr(event, "event_type", None)
         if event_type in ("opened", "closed") or (event.is_directory and event_type == "modified"):
-            return None
+            return
         if event.is_directory:
-            return None
+            return
         event_path = os.path.abspath(event.src_path)
         if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
-            return None
+            return
         if event_type in ("created", "modified"):
-            new_checksum = calculate_checksum(event_path)
-            if not new_checksum or FILE_CHECKSUMS.get(event_path) == new_checksum:
-                return None
-            FILE_CHECKSUMS[event_path] = new_checksum
+            try:
+                st = os.stat(event_path)
+            except OSError:
+                return
+            cached = FILE_CHECKSUMS.get(event_path)
+            if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+                return
         elif event_type == "deleted":
             FILE_CHECKSUMS.pop(event_path, None)
         else:
-            return None
+            return
 
         event_bucket = LAST_MODIFIED["files"].setdefault(event_path, {})
         if event_type == "deleted":
@@ -1758,12 +1770,14 @@ def watch(directory, config, project_config, api, server, playground, restart, b
     click.echo(f"""Server: {selected_server["name"]}""")
 
     if not playground:
-        if project_config and "playground" in selected_server:
-            playground = selected_server["playground"]
-        elif (
-            "directory" in selected_server
-            and selected_server["directory"] == directory
+        if (
+            project_config
             and "playground" in selected_server
+            or (
+                "directory" in selected_server
+                and selected_server["directory"] == directory
+                and "playground" in selected_server
+            )
         ):
             playground = selected_server["playground"]
         else:
@@ -1794,6 +1808,7 @@ def watch(directory, config, project_config, api, server, playground, restart, b
     try:
         while True:
             if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
+                LAST_MODIFIED["files"] = filter_changed_files(LAST_MODIFIED["files"])
                 changed_files = deduplicate_watch_events(LAST_MODIFIED["files"])
                 if not changed_files:
                     LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
@@ -1813,7 +1828,7 @@ def watch(directory, config, project_config, api, server, playground, restart, b
                     time.sleep(buffer)
                 else:
                     effective_restart = "no"
-                for item in changed_files.keys():
+                for item in changed_files:
                     click.echo("  " + item.replace(directory, ""))
                 LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
 
@@ -1995,22 +2010,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "docassemble.{pkgname}"
 version = "{version}"
-description = {repr(description)}
+description = {description!r}
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    {{ name = {repr(developer_name)}, email = {repr(developer_email)} }},
+    {{ name = {developer_name!r}, email = {developer_email!r} }},
 ]
 dependencies = []
 
 [project.urls]
-Homepage = {repr(package_url)}
+Homepage = {package_url!r}
 
 [tool.setuptools.packages.find]
 where = ["."]
 """
     if license:
-        pyproject += f'\nlicense = {repr(license)}\nlicense-files = ["LICENSE"]\n'
+        pyproject += f'\nlicense = {license!r}\nlicense-files = ["LICENSE"]\n'
     setuppy = """\
 import os
 import sys

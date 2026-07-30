@@ -1098,7 +1098,7 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     mod.GITMATCH_COMPILED = None
     mod.DEBUG = True
     mod.scan_directory(str(package_dir))
-    assert mod.FILE_CHECKSUMS[str(kept_file)] == "checksum:keep.txt"
+    assert mod.FILE_CHECKSUMS[str(kept_file)][2] == "checksum:keep.txt"
     assert str(ignored_file) not in mod.FILE_CHECKSUMS
 
     handler = mod.WatchHandler(directory=str(package_dir))
@@ -1106,13 +1106,15 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
 
     monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
     monkeypatch.setattr(mod.time, "time", lambda: 123)
-    event = SimpleNamespace(
-        is_directory=False, event_type="created", src_path=str(package_dir / "docassemble" / "module.py")
-    )
+    module_file = package_dir / "docassemble" / "module.py"
+    module_file.parent.mkdir(parents=True, exist_ok=True)
+    module_file.write_text("module", encoding="utf-8")
+    event = SimpleNamespace(is_directory=False, event_type="created", src_path=str(module_file))
     handler.on_any_event(event)
     assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"created": True}}, "restart": True}
 
-    mod.FILE_CHECKSUMS[event.src_path] = "checksum:module.py"
+    module_stat = os.stat(event.src_path)
+    mod.FILE_CHECKSUMS[event.src_path] = (module_stat.st_mtime, module_stat.st_size, "checksum:module.py")
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
     handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=event.src_path))
     assert mod.LAST_MODIFIED == {"time": 0, "files": {}, "restart": False}
@@ -1125,6 +1127,7 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
 def test_watch_command(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
     installs = []
 
     class FakeObserver:
@@ -1160,6 +1163,7 @@ def test_watch_command(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": True}
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
 
@@ -1184,6 +1188,7 @@ def test_watch_command(tmp_path, monkeypatch):
 def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
     install_calls = []
     monkeypatch.setattr(
@@ -1216,6 +1221,7 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
 
@@ -1268,6 +1274,108 @@ def test_watch_helpers_and_incremental_playground_upload(tmp_path, monkeypatch):
     assert calls[0][0].endswith("/api/playground")
     assert calls[0][1]["folder"] == "questions"
     assert calls[-1][1]["restart"] == "1"
+
+
+def test_calculate_checksum_uses_xxhash(tmp_path):
+    file_a = tmp_path / "a.txt"
+    file_b = tmp_path / "b.txt"
+    file_a.write_text("hello", encoding="utf-8")
+    file_b.write_text("world", encoding="utf-8")
+    hash_a = mod.calculate_checksum(str(file_a))
+    hash_b = mod.calculate_checksum(str(file_b))
+    assert len(hash_a) == 16
+    assert hash_a != hash_b
+    assert mod.calculate_checksum(str(file_a)) == hash_a
+
+
+def test_on_any_event_uses_mtime_size_precheck(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    target = package_dir / "file.py"
+    target.write_text("content", encoding="utf-8")
+    handler = mod.WatchHandler(directory=str(package_dir))
+    monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
+    monkeypatch.setattr(mod.time, "time", lambda: 42)
+
+    st = os.stat(str(target))
+    mod.FILE_CHECKSUMS[str(target)] = (st.st_mtime, st.st_size, "old_hash")
+
+    calls = []
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: calls.append(path) or "new_hash")
+
+    handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=str(target)))
+    assert mod.LAST_MODIFIED == {"time": 0, "files": {}, "restart": False}
+    assert calls == []
+
+
+def test_on_any_event_records_when_mtime_size_differs(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    target = package_dir / "file.py"
+    target.write_text("content", encoding="utf-8")
+    handler = mod.WatchHandler(directory=str(package_dir))
+    monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
+    monkeypatch.setattr(mod.time, "time", lambda: 42)
+
+    mod.FILE_CHECKSUMS[str(target)] = (0.0, 0, "old_hash")
+
+    calls = []
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: calls.append(path) or "new_hash")
+
+    handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=str(target)))
+    assert mod.LAST_MODIFIED == {"time": 42, "files": {str(target): {"modified": True}}, "restart": False}
+    assert calls == []
+
+
+def test_filter_changed_files_dedups_bursts(tmp_path, monkeypatch):
+    target = tmp_path / "file.py"
+    target.write_text("content", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: calls.append(path) or "hash")
+
+    events = {str(target): {"modified": True}}
+    result = mod.filter_changed_files(events)
+    assert result == {str(target): {"modified": True}}
+    assert calls == [str(target)]
+    assert mod.FILE_CHECKSUMS[str(target)][2] == "hash"
+
+
+def test_filter_changed_files_drops_unchanged_content(tmp_path, monkeypatch):
+    target = tmp_path / "file.py"
+    target.write_text("content", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "same_hash")
+    st = os.stat(str(target))
+    mod.FILE_CHECKSUMS[str(target)] = (st.st_mtime, st.st_size, "same_hash")
+
+    events = {str(target): {"modified": True}}
+    result = mod.filter_changed_files(events)
+    assert result == {}
+
+
+def test_filter_changed_files_preserves_deletions(tmp_path, monkeypatch):
+    target = tmp_path / "file.py"
+    target.write_text("content", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: calls.append(path) or "hash")
+    mod.FILE_CHECKSUMS[str(target)] = (0.0, 0, "hash")
+
+    events = {str(target): {"deleted": True}}
+    result = mod.filter_changed_files(events)
+    assert result == {str(target): {"deleted": True}}
+    assert calls == []
+
+
+def test_filter_changed_files_handles_disappeared_file(tmp_path):
+    target = tmp_path / "file.py"
+    target.write_text("content", encoding="utf-8")
+    target.unlink()
+
+    events = {str(target): {"modified": True}}
+    result = mod.filter_changed_files(events)
+    assert result == {}
 
 
 def test_playground_classification_and_upload_error_paths(tmp_path, monkeypatch):
@@ -1971,6 +2079,7 @@ def test_watch_handler_ignores_and_resets_deleted_bucket(tmp_path, monkeypatch):
 def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
     class FakeObserver:
         def schedule(self, *args, **kwargs):
@@ -2004,6 +2113,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
     upload_calls = []
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
     monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
 
     mod.FULL_INSTALL_DONE = True
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "ignored.yml"): {}}, "restart": False}
@@ -2032,6 +2142,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
 def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
     class FakeObserver:
         def schedule(self, *args, **kwargs):
@@ -2065,6 +2176,7 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
     upload_calls = []
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
     monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
 
     mod.FULL_INSTALL_DONE = True
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
@@ -2088,6 +2200,7 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
 def test_watch_dry_run_uses_incremental_playground_preview(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
     class FakeObserver:
         def schedule(self, *args, **kwargs):
@@ -2121,6 +2234,7 @@ def test_watch_dry_run_uses_incremental_playground_preview(tmp_path, monkeypatch
     upload_calls = []
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: package_calls.append(kwargs) or 0)
     monkeypatch.setattr(mod, "upload_playground_files", lambda **kwargs: upload_calls.append(kwargs) or True)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
 
     mod.FULL_INSTALL_DONE = True
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
@@ -2234,6 +2348,7 @@ def test_watch_startup_install_message_dry_run(tmp_path, monkeypatch, capsys):
 def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
     class FakeObserver:
         def schedule(self, *args, **kwargs):
@@ -2258,6 +2373,7 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
     installs = []
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
     mod.FULL_INSTALL_DONE = False
     mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
 
@@ -2998,7 +3114,7 @@ def test_watch_handler_and_scan_remaining_branches(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "calculate_checksum", lambda path: "checksum")
     mod.DEBUG = False
     mod.scan_directory(str(package_dir))
-    assert mod.FILE_CHECKSUMS[str(keep_file)] == "checksum"
+    assert mod.FILE_CHECKSUMS[str(keep_file)][2] == "checksum"
 
     handler = mod.WatchHandler(directory=str(package_dir))
     monkeypatch.setattr(mod.time, "time", lambda: 7)
