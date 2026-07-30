@@ -10,6 +10,8 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ## Unreleased
 
+## [26.7.2] - 2026-07-30
+
 ### Added
 
 - Added `--no-playground` to `install`, `watch`, `download`, and `config add` so
