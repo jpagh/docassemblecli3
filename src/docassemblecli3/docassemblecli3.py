@@ -29,6 +29,7 @@ LAST_MODIFIED = {
     "files": {},
     "restart": False,
 }
+LAST_MODIFIED_LOCK = threading.Lock()
 FULL_INSTALL_DONE = False
 FILE_CHECKSUMS = {}
 DEBUG = False
@@ -428,6 +429,10 @@ def http_get(url: str, **kwargs):
 
 def http_post(url: str, **kwargs):
     return http_request("post", url, **kwargs)
+
+
+def http_delete(url: str, **kwargs):
+    return http_request("delete", url, **kwargs)
 
 
 def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
@@ -1208,6 +1213,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     if (
                         not has_python_files
                         and the_file.endswith(".py")
+                        and adjusted_root.startswith("docassemble" + os.sep)
                         and not (the_file in ("setup.py", "setup.cfg", "pyproject.toml") and root == root_directory)
                         and the_file != "__init__.py"
                     ):
@@ -1510,13 +1516,13 @@ def download(config, api, server, playground, overwrite, package):
     selected_server = select_server(*config, *api, server)
     package_name = normalize_package_name(package)
     package_file_name = re.sub(r"docassemble\.", "docassemble-", package_name)
-    with tempfile.NamedTemporaryFile(suffix=".zip") as archive:
+    with tempfile.TemporaryFile(suffix=".zip") as archive:
         try:
             if playground:
                 params = {"folder": "packages", "filename": package_name}
                 if playground != "default":
                     params["project"] = playground
-                response = requests.get(
+                response = http_get(
                     selected_server["apiurl"] + "/api/playground",
                     params=params,
                     stream=True,
@@ -1527,7 +1533,7 @@ def download(config, api, server, playground, overwrite, package):
                     return "Package not found."
                 response.raise_for_status()
             else:
-                response = requests.get(
+                response = http_get(
                     selected_server["apiurl"] + "/api/package",
                     headers={"X-API-Key": selected_server["apikey"]},
                     timeout=600,
@@ -1541,7 +1547,7 @@ def download(config, api, server, playground, overwrite, package):
                         break
                 if zip_file_number is None:
                     return "Package installed but is not downloadable."
-                response = requests.get(
+                response = http_get(
                     selected_server["apiurl"] + "/api/file/" + str(zip_file_number),
                     stream=True,
                     timeout=600,
@@ -1554,10 +1560,11 @@ def download(config, api, server, playground, overwrite, package):
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
 
-        with open(archive.name, "wb") as fp:
-            fp.writelines(response.iter_content(8192))
+        for chunk in response.iter_content(8192):
+            archive.write(chunk)
+        archive.seek(0)
 
-        with zipfile.ZipFile(archive.name, mode="r") as zf:
+        with zipfile.ZipFile(archive, mode="r") as zf:
             if not overwrite:
                 for file_info in zf.infolist():
                     if os.path.exists(file_info.filename):
@@ -1591,7 +1598,7 @@ def uninstall(config, api, server, restart, package):
         data["restart"] = "0"
 
     try:
-        response = requests.delete(
+        response = http_delete(
             selected_server["apiurl"] + "/api/package",
             params=data,
             headers={"X-API-Key": selected_server["apikey"]},
@@ -1709,30 +1716,25 @@ class WatchHandler(FileSystemEventHandler):
         event_path = os.path.abspath(event.src_path)
         if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
             return
-        if event_type in ("created", "modified"):
-            try:
-                st = os.stat(event_path)
-            except OSError:
-                return
-            cached = FILE_CHECKSUMS.get(event_path)
-            if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
-                return
-        elif event_type == "deleted":
+        if event_type == "deleted":
             FILE_CHECKSUMS.pop(event_path, None)
-        else:
+        elif event_type not in ("created", "modified"):
             return
 
-        event_bucket = LAST_MODIFIED["files"].setdefault(event_path, {})
-        if event_type == "deleted":
-            LAST_MODIFIED["files"][event_path] = {"deleted": True}
-        else:
-            if "deleted" in event_bucket:
-                event_bucket = {}
-            event_bucket[event_type] = True
-            LAST_MODIFIED["files"][event_path] = event_bucket
-        LAST_MODIFIED["time"] = time.time()
-        if event_path.endswith(".py") and event_path.startswith(os.path.join(self.directory, "docassemble") + os.sep):
-            LAST_MODIFIED["restart"] = True
+        with LAST_MODIFIED_LOCK:
+            event_bucket = LAST_MODIFIED["files"].setdefault(event_path, {})
+            if event_type == "deleted":
+                LAST_MODIFIED["files"][event_path] = {"deleted": True}
+            else:
+                if "deleted" in event_bucket:
+                    event_bucket = {}
+                event_bucket[event_type] = True
+                LAST_MODIFIED["files"][event_path] = event_bucket
+            LAST_MODIFIED["time"] = time.time()
+            if event_path.endswith(".py") and event_path.startswith(
+                os.path.join(self.directory, "docassemble") + os.sep
+            ):
+                LAST_MODIFIED["restart"] = True
 
 
 # =============================================================================
@@ -1816,61 +1818,68 @@ def watch(directory, config, project_config, api, server, playground, restart, b
     stop_message = """\nStopping "docassemblecli3 watch"."""
     try:
         while True:
-            if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
-                LAST_MODIFIED["files"] = filter_changed_files(LAST_MODIFIED["files"])
-                changed_files = deduplicate_watch_events(LAST_MODIFIED["files"])
-                if not changed_files:
+            files_to_process = None
+            should_restart = False
+            with LAST_MODIFIED_LOCK:
+                if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
+                    files_to_process = LAST_MODIFIED["files"]
+                    should_restart = LAST_MODIFIED["restart"]
                     LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
-                    time.sleep(0.2)
-                    continue
-                if dry_run:
-                    click.secho(
-                        f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
-                        fg="cyan",
-                    )
-                else:
-                    click.secho(
-                        f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Installing...""",
-                        fg="yellow",
-                    )
-                if restart_param == "yes" or (restart_param == "auto" and LAST_MODIFIED["restart"]):
-                    effective_restart = "yes"
-                    time.sleep(buffer)
-                else:
-                    effective_restart = "no"
-                for item in changed_files:
-                    click.echo("  " + item.replace(directory, ""))
-                LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
+            if files_to_process is None:
+                time.sleep(0.2)
+                continue
+            files_to_process = filter_changed_files(files_to_process)
+            changed_files = deduplicate_watch_events(files_to_process)
+            if not changed_files:
+                time.sleep(0.2)
+                continue
+            if dry_run:
+                click.secho(
+                    f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
+                    fg="cyan",
+                )
+            else:
+                click.secho(
+                    f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Installing...""",
+                    fg="yellow",
+                )
+            if restart_param == "yes" or (restart_param == "auto" and should_restart):
+                effective_restart = "yes"
+                time.sleep(buffer)
+            else:
+                effective_restart = "no"
+            for item in changed_files:
+                click.echo("  " + item.replace(directory, ""))
 
-                install_result = None
-                if playground and FULL_INSTALL_DONE:
-                    uploaded = upload_playground_files(
-                        apiurl=selected_server["apiurl"],
-                        apikey=selected_server["apikey"],
-                        playground=playground,
-                        changed_files=changed_files,
-                        dry_run=dry_run,
-                        show_files=show_files,
-                    )
-                    if uploaded:
-                        if dry_run:
-                            click.secho("Dry run: incremental Playground upload preview complete.", fg="cyan")
-                        else:
-                            announce_installed()
-                        install_result = 0
+            install_result = None
+            if playground and FULL_INSTALL_DONE:
+                uploaded = upload_playground_files(
+                    apiurl=selected_server["apiurl"],
+                    apikey=selected_server["apikey"],
+                    playground=playground,
+                    changed_files=changed_files,
+                    dry_run=dry_run,
+                    show_files=show_files,
+                )
+                if uploaded:
+                    if dry_run:
+                        click.secho("Dry run: incremental Playground upload preview complete.", fg="cyan")
+                    else:
+                        announce_installed()
+                    install_result = 0
 
-                if install_result is None:
-                    install_result = package_installer(
-                        directory=directory,
-                        apiurl=selected_server["apiurl"],
-                        apikey=selected_server["apikey"],
-                        playground=playground,
-                        restart=effective_restart,
-                        dry_run=dry_run,
-                        show_files=show_files,
-                    )
-                FULL_INSTALL_DONE = install_result == 0
-            time.sleep(1)
+            if install_result is None:
+                install_result = package_installer(
+                    directory=directory,
+                    apiurl=selected_server["apiurl"],
+                    apikey=selected_server["apikey"],
+                    playground=playground,
+                    restart=effective_restart,
+                    dry_run=dry_run,
+                    show_files=show_files,
+                )
+            FULL_INSTALL_DONE = install_result == 0
+            time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     except Exception as e:  # noqa: BLE001
@@ -2380,23 +2389,25 @@ def show(config_path, use_project_config, use_global_config, directory):
 
 
 @config.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("config", type=click.File(mode="w", encoding="utf-8"))
+@click.argument("config", type=click.Path())
 def new(config):
     """
     Create a new config file.
     """
-    if os.path.exists(config.name) and os.stat(config.name).st_size != 0:
+    config_path = os.path.abspath(config)
+    if os.path.exists(config_path) and os.stat(config_path).st_size != 0:
         raise click.BadParameter("File exists and is not empty!")
     env = []
     try:
-        yaml.dump(env, config)
-        os.chmod(config.name, stat.S_IRUSR | stat.S_IWUSR)
+        with open(config_path, "w", encoding="utf-8") as fp:
+            yaml.dump(env, fp)
+        os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         raise click.BadParameter("File is not usable.")
-    click.echo(f"""Config created successfully: {os.path.abspath(config.name)}""")
+    click.echo(f"""Config created successfully: {config_path}""")
     if click.confirm("Do you want to add a server to this new config file?", default=True):
         apiurl, apikey = prompt_for_api()
-        add_server_to_env(cfg=config.name, env=env, apiurl=apiurl, apikey=apikey)
+        add_server_to_env(cfg=config_path, env=env, apiurl=apiurl, apikey=apikey)
 
 
 @config.command(context_settings=CONTEXT_SETTINGS, hidden=True)
@@ -2405,7 +2416,7 @@ def new(config):
 def server_version(config, api, server):
     selected_server = select_server(*config, *api, server)
     try:
-        r = requests.get(
+        r = http_get(
             selected_server["apiurl"] + "/api/package", headers={"X-API-Key": selected_server["apikey"]}, timeout=600
         )
         if DEBUG:

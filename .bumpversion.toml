@@ -8,15 +8,21 @@
     )
     \\.(?P<patch>\\d+)              # .patch
 """
-    pre_commit_hooks = ["uv lock", "git add uv.lock"]
+    pre_commit_hooks = [
+        "uv run scripts/update_changelog.py",
+        "git add CHANGELOG.md",
+        "uv lock",
+        "git add uv.lock",
+    ]
     serialize        = ["{release}.{patch}"]
     tag              = true
     tag_name         = "v{new_version}"
 
     [[tool.bumpversion.files]]
         filename = "pyproject.toml"
-        replace  = 'version = "{new_version}"'
-        search   = 'version = "{current_version}"'
+        search   = 'version(\s*=\s*)"{current_version}"'
+        replace  = 'version\1"{new_version}"'
+        regex    = true
 
     [tool.bumpversion.parts.release]
         calver_format = "{0Y}.{MM}"

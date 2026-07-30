@@ -1,4 +1,4 @@
-from src.docassemblecli3 import cli
+from docassemblecli3 import cli
 
 if __name__ == "__main__":
     cli()

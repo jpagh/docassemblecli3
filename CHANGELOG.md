@@ -20,6 +20,15 @@ summaries inferred from diffs where commit messages were not descriptive.
 ### Fixed
 
 - Improved error handling for invalid project configuration files.
+- `da download` and `da uninstall` now use the same proxy-safe connections as
+  other commands, avoiding possible hangs behind certain HTTP/3 reverse proxies.
+- `da download` now works reliably on Windows.
+- `da config new` no longer silently overwrites an existing config file.
+- `da install` now matches `watch` and only restarts the server when Python
+  files inside the `docassemble/` package directory change, so editing test files
+  no longer triggers an unnecessary restart.
+- The `watch` command now detects more rapid file changes, including edits that
+  keep the same file size.
 
 ## [26.7.0] - 2026-07-11
 

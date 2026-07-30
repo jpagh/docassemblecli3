@@ -1,5 +1,4 @@
 import importlib
-import io
 import os
 import runpy
 import sys
@@ -12,8 +11,8 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-import src.docassemblecli3.docassemblecli3 as mod
-from src import docassemblecli3
+import docassemblecli3
+import docassemblecli3.docassemblecli3 as mod
 
 
 class DummyResponse:
@@ -1115,11 +1114,9 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     handler.on_any_event(event)
     assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"created": True}}, "restart": True}
 
-    module_stat = os.stat(event.src_path)
-    mod.FILE_CHECKSUMS[event.src_path] = (module_stat.st_mtime, module_stat.st_size, "checksum:module.py")
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
     handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=event.src_path))
-    assert mod.LAST_MODIFIED == {"time": 0, "files": {}, "restart": False}
+    assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"modified": True}}, "restart": True}
 
     delete_event = SimpleNamespace(is_directory=False, event_type="deleted", src_path=event.src_path)
     handler.on_any_event(delete_event)
@@ -1290,7 +1287,7 @@ def test_calculate_checksum_uses_xxhash(tmp_path):
     assert mod.calculate_checksum(str(file_a)) == hash_a
 
 
-def test_on_any_event_uses_mtime_size_precheck(tmp_path, monkeypatch):
+def test_on_any_event_queues_event_despite_unchanged_mtime_size(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
     target = package_dir / "file.py"
@@ -1306,7 +1303,7 @@ def test_on_any_event_uses_mtime_size_precheck(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "calculate_checksum", lambda path: calls.append(path) or "new_hash")
 
     handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=str(target)))
-    assert mod.LAST_MODIFIED == {"time": 0, "files": {}, "restart": False}
+    assert mod.LAST_MODIFIED == {"time": 42, "files": {str(target): {"modified": True}}, "restart": False}
     assert calls == []
 
 
@@ -1509,21 +1506,15 @@ def test_config_commands(tmp_path, monkeypatch, runner):
     new_path = tmp_path / "new-config.yml"
     monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
     monkeypatch.setattr(mod, "prompt_for_api", lambda: ("https://example.com", "key"))
-    new_file = new_path.open("w", encoding="utf-8")
-    try:
-        assert mod.new.callback(new_file) is None
-    finally:
-        new_file.close()
+    assert mod.new.callback(str(new_path)) is None
 
     nonempty = tmp_path / "nonempty.yml"
     nonempty.write_text("value", encoding="utf-8")
-    fake_file = io.StringIO()
-    fake_file.name = str(nonempty)
     with pytest.raises(click.BadParameter):
-        mod.new.callback(fake_file)
+        mod.new.callback(str(nonempty))
 
     response = DummyResponse(status_code=403, text="forbidden")
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: response)
+    monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: response)
     with pytest.raises(click.ClickException):
         mod.server_version.callback(
             (str(config_path), [{"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}]),
@@ -1532,8 +1523,8 @@ def test_config_commands(tmp_path, monkeypatch, runner):
         )
 
     monkeypatch.setattr(
-        mod.requests,
-        "get",
+        mod,
+        "http_get",
         lambda *args, **kwargs: DummyResponse(
             status_code=200,
             json_data=[{"name": "docassemble.base", "version": "1.6.0"}],
@@ -1979,13 +1970,13 @@ def test_download_and_uninstall_commands(tmp_path, monkeypatch):
             return DummyResponse(status_code=200, chunks=[archive_path.read_bytes()])
         raise AssertionError(url)
 
-    monkeypatch.setattr(mod.requests, "get", fake_get)
+    monkeypatch.setattr(mod, "http_get", fake_get)
     monkeypatch.chdir(tmp_path)
     assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == 0
     assert (tmp_path / "docassemble-test" / "README.md").is_file()
 
     monkeypatch.setattr(
-        mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
+        mod, "http_delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
     )
     monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
     assert mod.uninstall.callback(("cfg", []), (None, None), "", True, "test") == 0
@@ -2001,39 +1992,39 @@ def test_download_and_uninstall_error_paths(tmp_path, monkeypatch):
         playground_calls.append(params)
         return DummyResponse(status_code=404)
 
-    monkeypatch.setattr(mod.requests, "get", fake_playground_get)
+    monkeypatch.setattr(mod, "http_get", fake_playground_get)
     assert mod.download.callback(("cfg", []), (None, None), "", "proj", False, "test") == "Package not found."
     assert playground_calls[0]["project"] == "proj"
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=500))
+    monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: DummyResponse(status_code=500))
     assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Unable to connect to server."
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
+    monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
     assert (
         mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
         == "Package installed but is not downloadable."
     )
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.HTTPError("bad")))
+    monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.HTTPError("bad")))
     assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Error downloading package: bad"
 
     monkeypatch.setattr(
-        mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+        mod, "http_get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
     )
     with pytest.raises(click.ClickException):
         mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
 
-    monkeypatch.setattr(mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
+    monkeypatch.setattr(mod, "http_delete", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
     assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == "package DELETE returned 500: bad"
 
     monkeypatch.setattr(
-        mod.requests, "delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
+        mod, "http_delete", lambda *args, **kwargs: DummyResponse(status_code=200, json_data={"task_id": "task"})
     )
     monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: False)
     assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == 1
 
     monkeypatch.setattr(
-        mod.requests, "delete", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+        mod, "http_delete", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
     )
     with pytest.raises(click.ClickException):
         mod.uninstall.callback(("cfg", []), (None, None), "", False, "test")
@@ -2048,8 +2039,8 @@ def test_download_playground_success_and_overwrite_guard(tmp_path, monkeypatch):
         zf.writestr("docassemble-test/README.md", "hello")
 
     monkeypatch.setattr(
-        mod.requests,
-        "get",
+        mod,
+        "http_get",
         lambda *args, **kwargs: DummyResponse(status_code=200, chunks=[archive_path.read_bytes()]),
     )
     monkeypatch.chdir(tmp_path)
@@ -2919,16 +2910,15 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
 
 
 def test_new_config_failure_and_server_version_debug(tmp_path, monkeypatch):
-    unusable = io.StringIO()
-    unusable.name = str(tmp_path / "unusable.yml")
+    unusable = str(tmp_path / "unusable.yml")
     monkeypatch.setattr(mod.yaml, "dump", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("nope")))
     with pytest.raises(click.BadParameter):
         mod.new.callback(unusable)
 
     monkeypatch.setattr(mod, "DEBUG", True)
     monkeypatch.setattr(
-        mod.requests,
-        "get",
+        mod,
+        "http_get",
         lambda *args, **kwargs: DummyResponse(
             status_code=200, json_data=[{"name": "docassemble.base", "version": "1.6.0"}]
         ),
@@ -3120,6 +3110,51 @@ def test_package_installer_additional_restart_branches(tmp_path, monkeypatch):
     assert mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="yes") == 0
 
 
+def test_package_installer_ignores_tests_directory_for_restart(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {
+            "tests/test_something.py": "value = 1\n",
+            "docassemble/test/data/questions/interview.yml": "---\n",
+        },
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    posts = []
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/api/package"):
+            return DummyResponse(status_code=200, json_data=[{"name": "docassemble.test", "version": "0.0.1"}])
+        raise AssertionError(url)
+
+    def fake_post(url, data=None, files=None, headers=None, timeout=None):
+        posts.append((url, data))
+        if url.endswith("/api/package"):
+            return DummyResponse(status_code=200, json_data={"task_id": "task"})
+        if url.endswith("/api/clear_cache"):
+            return DummyResponse(status_code=204)
+        raise AssertionError(url)
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
+
+    assert mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="auto") == 0
+    assert len(posts) == 2
+    assert posts[0][0].endswith("/api/package")
+    assert posts[0][1] == {"restart": "0"}
+    assert posts[1][0].endswith("/api/clear_cache")
+
+
 def test_watch_handler_and_scan_remaining_branches(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -3185,6 +3220,73 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     )
 
 
+def test_watch_loop_snapshots_events_to_avoid_race(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "first.yml").write_text("---\n", encoding="utf-8")
+    (package_dir / "second.yml").write_text("---\n", encoding="utf-8")
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
+
+    install_calls = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: install_calls.append(kwargs) or 0)
+
+    original_filter = mod.filter_changed_files
+
+    def filter_and_inject(events):
+        handler = mod.WatchHandler(directory=str(package_dir))
+        handler.on_any_event(
+            SimpleNamespace(
+                is_directory=False,
+                event_type="modified",
+                src_path=str(package_dir / "second.yml"),
+            )
+        )
+        return original_filter(events)
+
+    monkeypatch.setattr(mod, "filter_changed_files", filter_and_inject)
+
+    mod.LAST_MODIFIED = {
+        "time": 1,
+        "files": {str(package_dir / "first.yml"): {"modified": True}},
+        "restart": False,
+    }
+
+    sleep_count = {"value": 0}
+
+    def fake_sleep(seconds):
+        sleep_count["value"] += 1
+        if sleep_count["value"] > 3:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
+
+    assert len(install_calls) == 2
+
+
 def test_create_and_config_remaining_branches(tmp_path, monkeypatch):
     existing_dir = tmp_path / "existing"
     existing_dir.mkdir()
@@ -3218,12 +3320,9 @@ def test_create_and_config_remaining_branches(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "save_config", lambda **kwargs: True)
     assert mod.remove.callback(str(config_path), False, False, None, "example.com") is None
 
-    new_file = (tmp_path / "no-add.yml").open("w", encoding="utf-8")
+    new_file = str(tmp_path / "no-add.yml")
     monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: False)
-    try:
-        assert mod.new.callback(new_file) is None
-    finally:
-        new_file.close()
+    assert mod.new.callback(new_file) is None
 
     config_for_server = (
         str(tmp_path / "cfg.yml"),
