@@ -10,6 +10,8 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ## Unreleased
 
+## [26.7.1] - 2026-07-30
+
 ### Changed
 
 - Performance improvements to the `watch` command's file monitoring. Saving a
