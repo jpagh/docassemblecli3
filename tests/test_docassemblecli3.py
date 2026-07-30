@@ -204,13 +204,13 @@ def test_common_params_for_directory_and_playground_decorator(tmp_path, runner):
 
     @click.command()
     @mod.common_params_for_directory_and_playground
-    def command(directory, playground):
-        click.echo(f"{directory}|{playground}")
+    def command(directory, playground, no_playground):
+        click.echo(f"{directory}|{playground}|{no_playground}")
 
     result = runner.invoke(command, ["--directory", str(package_dir), "--playground", "demo"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == f"{package_dir.resolve()}|demo"
+    assert result.output.strip() == f"{package_dir.resolve()}|demo|False"
 
 
 def test_project_command_config_helpers(tmp_path):
@@ -911,11 +911,17 @@ def test_install_command_and_checksums(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "resolve_command_server", lambda *args, **kwargs: selected_server)
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: calls.append(kwargs) or 0)
 
-    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", False, False) == 0
+    assert (
+        mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", False, False)
+        == 0
+    )
     assert calls[0]["directory"] == str(package_dir)
     assert calls[0]["dry_run"] is False
     assert calls[0]["show_files"] is False
-    assert mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", True, True) == 0
+    assert (
+        mod.install.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", True, True)
+        == 0
+    )
     assert calls[1]["dry_run"] is True
     assert calls[1]["show_files"] is True
     assert mod.calculate_checksum(str(target))
@@ -1175,7 +1181,9 @@ def test_watch_command(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0, False, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", 0, False, False
+    )
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert observer.stopped is True
@@ -1202,7 +1210,10 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: install_calls.append(kwargs) or 0)
 
-    assert mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", False, False) == 0
+    assert (
+        mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, False, "auto", False, False)
+        == 0
+    )
     assert install_calls[0]["playground"] == "install-playground"
 
     class FakeObserver:
@@ -1233,10 +1244,68 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    assert mod.watch.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, "auto", 0, False, False) == (
-        '\nStopping "docassemblecli3 watch".'
-    )
+    assert mod.watch.callback(
+        str(package_dir), ("cfg", []), True, (None, None), "", None, False, "auto", 0, False, False
+    ) == ('\nStopping "docassemblecli3 watch".')
     assert install_calls[-1]["playground"] == "watch-playground"
+
+
+def test_install_and_watch_no_playground_override(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "file.yml").write_text("content", encoding="utf-8")
+
+    install_calls = []
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda command_name, *args, **kwargs: {
+            "name": f"{command_name}.example.com",
+            "apiurl": f"https://{command_name}.example.com",
+            "apikey": f"{command_name}-key",
+            "playground": f"{command_name}-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: install_calls.append(kwargs) or 0)
+
+    assert (
+        mod.install.callback(str(package_dir), ("cfg", []), True, (None, None), "", None, True, "auto", False, False)
+        == 0
+    )
+    assert install_calls[0]["playground"] == ""
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(package_dir / "file.yml"): {"modified": True}}, "restart": False}
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 1:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    assert mod.watch.callback(
+        str(package_dir), ("cfg", []), True, (None, None), "", None, True, "auto", 0, False, False
+    ) == ('\nStopping "docassemblecli3 watch".')
+    assert install_calls[-1]["playground"] == ""
 
 
 def test_watch_helpers_and_incremental_playground_upload(tmp_path, monkeypatch):
@@ -1781,6 +1850,46 @@ def test_config_add_rejects_conflicting_local_command_options(tmp_path, runner):
     assert "--no-watch-default" in watch_result.output
 
 
+def test_config_add_no_playground_skips_prompt_and_stores_none(tmp_path, monkeypatch, runner):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / "setup.py").write_text("from setuptools import setup\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        mod,
+        "prompt_for_optional_playground",
+        lambda: (_ for _ in ()).throw(AssertionError("playground prompt should be skipped")),
+    )
+    monkeypatch.setattr(mod, "test_apiurl_apikey", lambda **kwargs: True)
+
+    result = runner.invoke(
+        mod.cli,
+        [
+            "config",
+            "add",
+            "--project-config",
+            "--api",
+            "https://no-play.example.com",
+            "key",
+            "--directory",
+            str(package_dir),
+            "--no-playground",
+            "--no-install-default",
+            "--no-watch-default",
+        ],
+    )
+
+    assert result.exit_code == 0
+    project_data = yaml.safe_load((package_dir / mod.PROJECT_CONFIG).read_text(encoding="utf-8"))
+    assert project_data["servers"][0] == {
+        "apiurl": "https://no-play.example.com",
+        "apikey": "key",
+        "name": "no-play.example.com",
+        "directory": str(package_dir.resolve()),
+    }
+    assert "playground" not in project_data["servers"][0]
+
+
 def test_config_add_watch_startup_none_clears_startup(tmp_path, monkeypatch, runner):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -1935,7 +2044,10 @@ def test_display_servers_install_playground_and_create_defaults(tmp_path, monkey
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or 0)
-    assert mod.install.callback(str(tmp_path), ("cfg", []), False, (None, None), "", "demo", "auto", False, False) == 0
+    assert (
+        mod.install.callback(str(tmp_path), ("cfg", []), False, (None, None), "", "demo", False, "auto", False, False)
+        == 0
+    )
     assert installs[0]["playground"] == "demo"
 
     prompts = iter(["", "", "", "", "MIT", "0.0.1"])
@@ -1972,7 +2084,7 @@ def test_download_and_uninstall_commands(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "http_get", fake_get)
     monkeypatch.chdir(tmp_path)
-    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == 0
+    assert mod.download.callback(("cfg", []), (None, None), "", None, False, False, "test") == 0
     assert (tmp_path / "docassemble-test" / "README.md").is_file()
 
     monkeypatch.setattr(
@@ -1993,26 +2105,32 @@ def test_download_and_uninstall_error_paths(tmp_path, monkeypatch):
         return DummyResponse(status_code=404)
 
     monkeypatch.setattr(mod, "http_get", fake_playground_get)
-    assert mod.download.callback(("cfg", []), (None, None), "", "proj", False, "test") == "Package not found."
+    assert mod.download.callback(("cfg", []), (None, None), "", "proj", False, False, "test") == "Package not found."
     assert playground_calls[0]["project"] == "proj"
 
     monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: DummyResponse(status_code=500))
-    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Unable to connect to server."
+    assert (
+        mod.download.callback(("cfg", []), (None, None), "", None, False, False, "test")
+        == "Unable to connect to server."
+    )
 
     monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
     assert (
-        mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
+        mod.download.callback(("cfg", []), (None, None), "", None, False, False, "test")
         == "Package installed but is not downloadable."
     )
 
     monkeypatch.setattr(mod, "http_get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.HTTPError("bad")))
-    assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Error downloading package: bad"
+    assert (
+        mod.download.callback(("cfg", []), (None, None), "", None, False, False, "test")
+        == "Error downloading package: bad"
+    )
 
     monkeypatch.setattr(
         mod, "http_get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
     )
     with pytest.raises(click.ClickException):
-        mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
+        mod.download.callback(("cfg", []), (None, None), "", None, False, False, "test")
 
     monkeypatch.setattr(mod, "http_delete", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
     assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == "package DELETE returned 500: bad"
@@ -2044,15 +2162,42 @@ def test_download_playground_success_and_overwrite_guard(tmp_path, monkeypatch):
         lambda *args, **kwargs: DummyResponse(status_code=200, chunks=[archive_path.read_bytes()]),
     )
     monkeypatch.chdir(tmp_path)
-    assert mod.download.callback(("cfg", []), (None, None), "", "default", False, "test") == 0
+    assert mod.download.callback(("cfg", []), (None, None), "", "default", False, False, "test") == 0
 
     collision_path = tmp_path / "docassemble-test" / "README.md"
     collision_path.write_text("existing", encoding="utf-8")
     assert (
-        mod.download.callback(("cfg", []), (None, None), "", "default", False, "test")
+        mod.download.callback(("cfg", []), (None, None), "", "default", False, False, "test")
         == "Unpacking the package here would overwrite existing files (docassemble-test/README.md). Use --overwrite if you want to overwrite existing files."
     )
-    assert mod.download.callback(("cfg", []), (None, None), "", "default", True, "test") == 0
+    assert mod.download.callback(("cfg", []), (None, None), "", "default", False, True, "test") == 0
+
+
+def test_download_no_playground_ignores_playground_option(tmp_path, monkeypatch):
+    selected_server = {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"}
+    monkeypatch.setattr(mod, "select_server", lambda *args, **kwargs: selected_server)
+
+    archive_path = tmp_path / "archive.zip"
+    with mod.zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr("docassemble-test/README.md", "hello")
+
+    package_calls = []
+
+    def fake_get(url, *args, **kwargs):
+        package_calls.append(url)
+        if url.endswith("/api/package"):
+            return DummyResponse(
+                status_code=200,
+                json_data=[{"name": "docassemble.test", "zip_file_number": 7}],
+            )
+        if url.endswith("/api/file/7"):
+            return DummyResponse(status_code=200, chunks=[archive_path.read_bytes()])
+        raise AssertionError(url)
+
+    monkeypatch.setattr(mod, "http_get", fake_get)
+    monkeypatch.chdir(tmp_path)
+    assert mod.download.callback(("cfg", []), (None, None), "", "ignored-project", True, False, "test") == 0
+    assert all("playground" not in url for url in package_calls)
 
 
 def test_watch_handler_ignores_and_resets_deleted_bucket(tmp_path, monkeypatch):
@@ -2131,7 +2276,9 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -2188,7 +2335,9 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -2243,7 +2392,9 @@ def test_watch_dry_run_uses_incremental_playground_preview(tmp_path, monkeypatch
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, True, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, True, False
+    )
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert package_calls == []
@@ -2292,9 +2443,9 @@ def test_watch_startup_install_message_non_dry_run(tmp_path, monkeypatch, capsys
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    assert mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False) == (
-        '\nStopping "docassemblecli3 watch".'
-    )
+    assert mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    ) == ('\nStopping "docassemblecli3 watch".')
     assert "Installing on startup." in capsys.readouterr().out
 
 
@@ -2338,9 +2489,9 @@ def test_watch_startup_install_message_dry_run(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    assert mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, True, False) == (
-        '\nStopping "docassemblecli3 watch".'
-    )
+    assert mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, True, False
+    ) == ('\nStopping "docassemblecli3 watch".')
     assert "Previewing startup install." in capsys.readouterr().out
 
 
@@ -2383,7 +2534,9 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
-    result = mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
 
     assert result == '\nStopping "docassemblecli3 watch".'
     assert installs[0]["restart"] == "no"
@@ -2904,7 +3057,7 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "auto", 0, False, False)
+        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", 0, False, False)
         == '\nStopping "docassemblecli3 watch".'
     )
 
@@ -3215,7 +3368,9 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     mod.LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
 
     assert (
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", "explicit", "auto", 0, False, False)
+        mod.watch.callback(
+            str(package_dir), ("cfg", []), False, (None, None), "", "explicit", False, "auto", 0, False, False
+        )
         == '\nStopping "docassemblecli3 watch".'
     )
 
@@ -3282,7 +3437,7 @@ def test_watch_loop_snapshots_events_to_avoid_race(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)
 
-    mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, "no", 0, False, False)
+    mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False)
 
     assert len(install_calls) == 2
 

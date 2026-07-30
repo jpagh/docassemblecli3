@@ -204,6 +204,11 @@ def common_params_for_installation(func):
         flag_value="default",
         help="Install into the default Playground or into the specified Playground project.",
     )
+    @click.option(
+        "--no-playground",
+        is_flag=True,
+        help="Install as a package, ignoring any Playground setting in the config.",
+    )
     @wraps(func)
     def wrapper(*args, **kwargs):
         return func(*args, **kwargs)
@@ -246,6 +251,11 @@ def common_params_for_directory_and_playground(func):
         is_flag=False,
         flag_value="default",
         help="Install into the default Playground or into the specified Playground project.",
+    )
+    @click.option(
+        "--no-playground",
+        is_flag=True,
+        help="Install as a package, ignoring any Playground setting in the config.",
     )
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -1462,14 +1472,16 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be installed without uploading anything.")
 @click.option("--show-files", is_flag=True, help="With --dry-run, list the files that would be uploaded.")
-def install(directory, config, project_config, api, server, playground, restart, dry_run, show_files):
+def install(directory, config, project_config, api, server, playground, no_playground, restart, dry_run, show_files):
     """
     Install a docassemble package on a docassemble server.
 
     `install` tries to get API info from the --api option first (if used), then from the first server listed in the ~/.docassemblecli file if it exists (unless the --config option is used), then it tries to use environmental variables, and finally it prompts the user directly.
     """
     selected_server = resolve_command_server_with_cleanup("install", directory, config, api, server, project_config)
-    if project_config and not playground and "playground" in selected_server:
+    if no_playground or playground == "":
+        playground = ""
+    elif playground is None and project_config and "playground" in selected_server:
         playground = selected_server["playground"]
     click.echo(f"""Server: {selected_server["name"]}""")
     if not playground:
@@ -1507,12 +1519,19 @@ def install(directory, config, project_config, api, server, playground, restart,
     flag_value="default",
     help="Download from the default Playground or from the specified Playground project.",
 )
+@click.option(
+    "--no-playground",
+    is_flag=True,
+    help="Download the installed package, ignoring any Playground option.",
+)
 @click.option("--overwrite/--no-overwrite", default=False, show_default=True, help="Overwrite existing files.")
 @click.argument("package")
-def download(config, api, server, playground, overwrite, package):
+def download(config, api, server, playground, no_playground, overwrite, package):
     """
     Download a docassemble package from a docassemble server or Playground.
     """
+    if no_playground or playground == "":
+        playground = ""
     selected_server = select_server(*config, *api, server)
     package_name = normalize_package_name(package)
     package_file_name = re.sub(r"docassemble\.", "docassemble-", package_name)
@@ -1763,7 +1782,9 @@ class WatchHandler(FileSystemEventHandler):
 )
 @click.option("--dry-run", is_flag=True, help="Show what watch would install without uploading anything.")
 @click.option("--show-files", is_flag=True, help="With --dry-run, list the files that would be uploaded.")
-def watch(directory, config, project_config, api, server, playground, restart, buffer, dry_run, show_files):
+def watch(
+    directory, config, project_config, api, server, playground, no_playground, restart, buffer, dry_run, show_files
+):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
 
@@ -1780,7 +1801,10 @@ def watch(directory, config, project_config, api, server, playground, restart, b
     click.echo()
     click.echo(f"""Server: {selected_server["name"]}""")
 
-    if not playground:
+    if no_playground or playground == "":
+        playground = ""
+        click.echo("Location: Package")
+    elif playground is None:
         if (
             project_config
             and "playground" in selected_server
@@ -2192,6 +2216,11 @@ def find_package_data(where=".", package="", exclude=standard_exclude, exclude_d
     help="Set the default Playground or specify the default Playground project.",
 )
 @click.option(
+    "--no-playground",
+    is_flag=True,
+    help="Do not set a default Playground for this server.",
+)
+@click.option(
     "--install-default/--no-install-default",
     default=None,
     help="In the local project config, set this server as the default for install.",
@@ -2230,6 +2259,7 @@ def add(
     use_global_config,
     directory,
     playground,
+    no_playground,
     install_default,
     install_playground,
     watch_default,
@@ -2277,7 +2307,9 @@ def add(
             else prompt_for_optional_directory()
         )
 
-    if playground is None:
+    if no_playground:
+        playground = ""
+    elif playground is None:
         playground = prompt_for_optional_playground()
 
     if target_scope == "local":

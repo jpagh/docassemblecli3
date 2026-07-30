@@ -176,7 +176,9 @@ works:
                                 first, then fall back to the selected config
                                 file  [default: project-config]
     -p, --playground (PROJECT)   Install into the default Playground or into the
-                                specified Playground project.
+                                 specified Playground project.
+    --no-playground              Install as a package, ignoring any Playground
+                                 setting in the config.
     -r, --restart [yes|no|auto]  On package install: yes, force a restart | no,
                                 do not restart | auto, only restart if the
                                 package has any .py files or if there are
@@ -236,6 +238,11 @@ the project after the `--playground` option, for example project "testing".
 
 Installing into the Playground with `--playground` is faster than installing an
 actual Python package because it does not need to run `pip`.
+
+If a server in your config has a default Playground, use `--no-playground` to
+force a normal package install instead.
+
+    da install --no-playground --directory docassemble-foobar
 
 ### download
 
@@ -307,7 +314,9 @@ works:
                                 first, then fall back to the selected config
                                 file  [default: project-config]
     -p, --playground (PROJECT)   Install into the default Playground or into the
-                                specified Playground project.
+                                 specified Playground project.
+    --no-playground              Install as a package, ignoring any Playground
+                                 setting in the config.
     -a, --api <URL TEXT>...      URL of the docassemble server and API key of
                                 the user (admin or developer)
     -s, --server SERVER          Specify a server from the config file
@@ -414,6 +423,9 @@ whether the server you are adding should become the default for `install` or
 `--watch-playground`, and `--watch-startup install|none`. If you pass one of
 those local-only options without also choosing a config target, `da config add`
 automatically writes to the local project config.
+
+Use `--no-playground` with `da config add` to skip the Playground prompt and store
+no default Playground for the server.
 
 The `.docassemblecli` config file can store additional configuration for each server:
 
