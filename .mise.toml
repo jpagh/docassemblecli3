@@ -3,7 +3,7 @@
 
 [tools]
     "pipx:bump-my-version" = "latest"
-    "pipx:ruff"            = "0.15"
+    "pipx:ruff"            = "latest"
     python                 = "3.12"
     tombi                  = "latest"
     uv                     = "latest"

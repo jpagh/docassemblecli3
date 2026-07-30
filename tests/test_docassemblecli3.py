@@ -526,13 +526,13 @@ def test_project_command_config_error_and_merge_branches(tmp_path, monkeypatch):
         {"install": {}, "watch": {}},
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         mod.parse_project_command_config("not-a-dict")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         mod.parse_project_command_config({"servers": "not-a-list"})
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         mod.parse_project_command_config({"servers": [], "watch": []})
 
     package_dir = tmp_path / "pkg"
@@ -646,7 +646,7 @@ def test_save_config_and_prompt_for_api(tmp_path, monkeypatch):
     assert mod.save_config(str(cfg), env) is True
     assert yaml.safe_load(cfg.read_text(encoding="utf-8")) == env
 
-    monkeypatch.setattr(mod.yaml, "dump", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(mod.yaml, "dump", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")))
     assert mod.save_config(str(cfg), env) is False
 
     prompts = iter(["https://prompt.example.com", "  secret  "])
@@ -846,7 +846,7 @@ def test_package_installer_restart_no_and_dependency_checks(tmp_path, monkeypatc
     assert posts[0][2] == {"zip"}
     assert posts[1][0] == "https://example.com/api/clear_cache"
 
-    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("git")))
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("git")))
     monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: DummyResponse(status_code=500, text="bad"))
     assert mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="no") == (
         "package POST returned 500: bad"
@@ -894,7 +894,9 @@ def test_package_installer_playground_and_restart_paths(tmp_path, monkeypatch):
 
     assert mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto") == 1
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(
+        mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("down"))
+    )
     with pytest.raises(click.ClickException):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="auto")
 
@@ -1405,7 +1407,9 @@ def test_playground_classification_and_upload_error_paths(tmp_path, monkeypatch)
     monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: True)
     assert mod.upload_playground_files("https://example.com", "key", "demo", changed_files) is False
 
-    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+    )
     with pytest.raises(click.ClickException):
         mod.upload_playground_files("https://example.com", "key", "demo", changed_files)
 
@@ -2013,7 +2017,9 @@ def test_download_and_uninstall_error_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.HTTPError("bad")))
     assert mod.download.callback(("cfg", []), (None, None), "", None, False, "test") == "Error downloading package: bad"
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+    )
     with pytest.raises(click.ClickException):
         mod.download.callback(("cfg", []), (None, None), "", None, False, "test")
 
@@ -2026,7 +2032,9 @@ def test_download_and_uninstall_error_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "wait_for_server", lambda *args, **kwargs: False)
     assert mod.uninstall.callback(("cfg", []), (None, None), "", False, "test") == 1
 
-    monkeypatch.setattr(mod.requests, "delete", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        mod.requests, "delete", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+    )
     with pytest.raises(click.ClickException):
         mod.uninstall.callback(("cfg", []), (None, None), "", False, "test")
 
@@ -2532,7 +2540,9 @@ def test_package_installer_nonplayground_error_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
-    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        mod.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("boom"))
+    )
     with pytest.raises(click.ClickException):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="auto")
 
@@ -2571,7 +2581,9 @@ def test_package_installer_nonplayground_error_paths(tmp_path, monkeypatch):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="yes")
 
     monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
-    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("post")))
+    monkeypatch.setattr(
+        mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("post"))
+    )
     with pytest.raises(click.ClickException):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground=None, restart="yes")
 
@@ -2581,7 +2593,7 @@ def test_package_installer_nonplayground_error_paths(tmp_path, monkeypatch):
         lambda *args, **kwargs: (
             DummyResponse(status_code=200, json_data={"task_id": "task"})
             if kwargs.get("files")
-            else (_ for _ in ()).throw(RuntimeError("cache"))
+            else (_ for _ in ()).throw(requests.RequestException("cache"))
         ),
     )
     monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: True)
@@ -2633,7 +2645,7 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         mod.requests,
         "post",
         lambda url, *args, **kwargs: (
-            (_ for _ in ()).throw(RuntimeError("create project"))
+            (_ for _ in ()).throw(requests.RequestException("create project"))
             if url.endswith("/api/playground/project")
             else DummyResponse(status_code=200, json_data={"task_id": "task"})
         ),
@@ -2665,12 +2677,14 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("install post"))
+        mod.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("install post"))
     )
     with pytest.raises(click.ClickException):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto")
 
-    post_sequence = iter([DummyResponse(status_code=400, text="bad", json_data=ValueError("json"))])
+    post_sequence = iter(
+        [DummyResponse(status_code=400, text="bad", json_data=requests.exceptions.JSONDecodeError("json", "", 0))]
+    )
     monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: next(post_sequence))
     assert mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto") == (
         "playground_install POST returned 400: bad"
@@ -2682,7 +2696,7 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         call_count["count"] += 1
         if call_count["count"] == 1:
             return DummyResponse(status_code=400, text="bad", json_data="Invalid project.")
-        raise RuntimeError("project create")
+        raise requests.RequestException("project create")
 
     monkeypatch.setattr(mod.requests, "post", post_raise_second)
     with pytest.raises(click.ClickException):
@@ -2707,13 +2721,15 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
             return DummyResponse(status_code=400, text="bad", json_data="Invalid project.")
         if call_count["count"] == 2:
             return DummyResponse(status_code=204)
-        raise RuntimeError("second install")
+        raise requests.RequestException("second install")
 
     monkeypatch.setattr(mod.requests, "post", post_raise_third)
     with pytest.raises(click.ClickException):
         mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto")
 
-    post_sequence = iter([DummyResponse(status_code=200, text="not-json", json_data=ValueError("json"))])
+    post_sequence = iter(
+        [DummyResponse(status_code=200, text="not-json", json_data=requests.exceptions.JSONDecodeError("json", "", 0))]
+    )
     monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: next(post_sequence))
     assert (
         mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto")
@@ -2905,7 +2921,7 @@ def test_watch_package_location_and_exception(tmp_path, monkeypatch):
 def test_new_config_failure_and_server_version_debug(tmp_path, monkeypatch):
     unusable = io.StringIO()
     unusable.name = str(tmp_path / "unusable.yml")
-    monkeypatch.setattr(mod.yaml, "dump", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("nope")))
+    monkeypatch.setattr(mod.yaml, "dump", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("nope")))
     with pytest.raises(click.BadParameter):
         mod.new.callback(unusable)
 

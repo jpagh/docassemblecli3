@@ -351,7 +351,9 @@ def normalize_license_string(license_name: str) -> str:
 
 
 def announce_installed() -> None:
-    click.secho(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Installed.{BELL}", fg="green")
+    click.secho(
+        f"[{datetime.datetime.now(tz=datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')}] Installed.{BELL}", fg="green"
+    )
 
 
 def format_install_location(playground: str | None) -> str:
@@ -524,7 +526,7 @@ def upload_playground_files(
                     )
             except FileNotFoundError:
                 continue
-            except Exception as err:
+            except requests.exceptions.RequestException as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
             if response.status_code == 200:
@@ -565,7 +567,7 @@ def validate_and_load_or_create_config(ctx, param, config: str) -> tuple[str, li
             env = yaml.load(fp, Loader=yaml.FullLoader)
             if not isinstance(env, list):
                 raise TypeError
-    except Exception:
+    except (yaml.YAMLError, TypeError, OSError):
         raise click.BadParameter("File is not a usable docassemblecli config.")
     return (config, env)
 
@@ -574,13 +576,13 @@ def parse_project_command_config(data) -> tuple[list, dict[str, dict]]:
     if isinstance(data, list):
         return data, {"install": {}, "watch": {}}
     if not isinstance(data, dict):
-        raise ValueError
+        raise TypeError
 
     servers = data.get("servers", [])
     if servers is None:
         servers = []
     if not isinstance(servers, list):
-        raise ValueError
+        raise TypeError
 
     sections = {}
     for command_name in ("install", "watch"):
@@ -588,7 +590,7 @@ def parse_project_command_config(data) -> tuple[list, dict[str, dict]]:
         if section is None:
             section = {}
         if not isinstance(section, dict):
-            raise ValueError
+            raise TypeError
         sections[command_name] = section
     return servers, sections
 
@@ -603,7 +605,7 @@ def load_project_command_config(directory: str, command_name: str) -> tuple[str,
         servers, sections = parse_project_command_config(data)
     except click.BadParameter:
         raise
-    except Exception:
+    except (yaml.YAMLError, TypeError, OSError):
         raise click.BadParameter("File is not a usable project config.", param_hint="--project-config")
     return config_path, servers, sections.get(command_name, {})
 
@@ -815,7 +817,7 @@ def save_config(cfg: str, env: list) -> bool:
         with open(cfg, "w", encoding="utf-8") as fp:
             yaml.dump(env, fp)
         os.chmod(cfg, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception as err:
+    except OSError as err:
         click.echo(f"Unable to save {cfg} file. {err.__class__.__name__}: {err}")
         return False
     return True
@@ -829,7 +831,7 @@ def load_or_create_project_config(directory: str) -> tuple[str, list, dict[str, 
         with open(config_path, "r", encoding="utf-8") as fp:
             data = yaml.load(fp, Loader=yaml.FullLoader)
         env, sections = parse_project_command_config(data)
-    except Exception:
+    except (yaml.YAMLError, TypeError, OSError):
         raise click.BadParameter("File is not a usable project config.", param_hint="--project-config")
     return config_path, env, sections
 
@@ -838,7 +840,7 @@ def save_project_config(config_path: str, env: list, sections: dict[str, dict]) 
     try:
         with open(config_path, "w", encoding="utf-8") as fp:
             yaml.dump({"servers": env, "install": sections.get("install", {}), "watch": sections.get("watch", {})}, fp)
-    except Exception as err:
+    except OSError as err:
         click.echo(f"Unable to save {config_path} file. {err.__class__.__name__}: {err}")
         return False
     return True
@@ -1000,7 +1002,7 @@ def test_apiurl_apikey(apiurl: str, apikey: str) -> bool:
                     fg="red",
                 )
             return False
-    except Exception as err:
+    except requests.exceptions.RequestException as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
         click.echo(f"""{err}\n""")
         return False
@@ -1128,7 +1130,7 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
                 apiurl=apiurl,
                 server_version_da=server_version_da,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             exception[0] = e
 
     # Start the installer in a separate thread
@@ -1161,213 +1163,174 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
 
 
 def package_installer(directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False):
-    archive = tempfile.NamedTemporaryFile(suffix=".zip")
-    zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w")
-    archived_files = []
-    try:
-        ignore_process = subprocess.run(
-            ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=directory,
-            check=False,
-        )
-        ignore_process.check_returncode()
-        raw_ignore = ignore_process.stdout.splitlines()
-    except Exception:
-        raw_ignore = []
-    to_ignore = [path.rstrip("/") for path in raw_ignore]
-    root_directory = None
-    has_python_files = False
-    this_package_name = None
-    dependencies = {}
-    for root, dirs, files in os.walk(directory, topdown=True):
-        adjusted_root = os.path.relpath(root, directory)
-        dirs[:] = [
-            d
-            for d in dirs
-            if d not in EXCLUDED_DIRECTORIES
-            and not d.endswith(".egg-info")
-            and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
-        ]
-        if root_directory is None and package_metadata_files_present(root):
-            root_directory = root
-            this_package_name, dependencies = load_package_metadata(root, files)
-        for the_file in files:
-            if (
-                the_file.endswith("~")
-                or the_file.endswith(".pyc")
-                or the_file.endswith(".swp")
-                or the_file.startswith("#")
-                or the_file.startswith(".#")
-                or the_file.endswith(".tmp")
-                or ".tmp." in the_file
-                or the_file.endswith(".swx")
-                or (the_file == ".gitignore" and root_directory == root)
-                or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
-            ):
-                continue
-            if (
-                not has_python_files
-                and the_file.endswith(".py")
-                and not (the_file in ("setup.py", "setup.cfg", "pyproject.toml") and root == root_directory)
-                and the_file != "__init__.py"
-            ):
-                has_python_files = True
-            archived_files.append(os.path.relpath(os.path.join(root, the_file), directory))
-            zf.write(
-                os.path.join(root, the_file),
-                os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")),
-            )
-    zf.close()
-    archive.seek(0)
-    archived_files.sort()
-    if restart == "no":
-        should_restart = False
-    elif restart == "yes" or has_python_files:
-        should_restart = True
-    elif len(dependencies) > 0 or this_package_name:
-        try:
-            r = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
-        except Exception as err:
-            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-            raise click.ClickException(f"""{err}\n""")
-        if r.status_code != 200:
-            return "/api/package returned " + str(r.status_code) + ": " + r.text
-        installed_packages = r.json()
-        already_installed = False
-        for package_info in installed_packages:
-            package_info["alt_name"] = re.sub(r"^docassemble\.", "docassemble-", package_info["name"])
-            for dependency_name, dependency_info in dependencies.items():
-                if dependency_name in (package_info["name"], package_info["alt_name"]):
-                    condition = True
-                    if dependency_info["operator"]:
-                        if dependency_info["operator"] == "==":
-                            condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(
-                                dependency_info["version"]
-                            )
-                        elif dependency_info["operator"] == "<=":
-                            condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(
-                                dependency_info["version"]
-                            )
-                        elif dependency_info["operator"] == ">=":
-                            condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(
-                                dependency_info["version"]
-                            )
-                        elif dependency_info["operator"] == "<":
-                            condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(
-                                dependency_info["version"]
-                            )
-                        elif dependency_info["operator"] == ">":  # pragma: no branch
-                            condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(
-                                dependency_info["version"]
-                            )
-                    if condition:  # pragma: no branch
-                        dependency_info["installed"] = True
-            if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
-                already_installed = True
-        should_restart = bool(
-            (not already_installed and len(dependencies) > 0)
-            or not all(item["installed"] for item in dependencies.values())
-        )
-    else:
-        should_restart = True
-    data = {}
-    if should_restart and not dry_run:
-        try:
-            server_packages = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
-            if server_packages.status_code != 200:
-                if server_packages.status_code == 403:
-                    click.secho("""\nThe API KEY is invalid.""", fg="red")
-                server_packages.raise_for_status()
-            else:
-                installed_packages = server_packages.json()
-                for package in installed_packages:
-                    if package.get("name", "") == "docassemble.base":
-                        server_version_da = package.get("version", "0")
-        except Exception as err:
-            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-            raise click.ClickException(f"""{err}\n""")
-        click.secho("Server will restart.", fg="yellow")
-    if not should_restart:
-        server_version_da = "norestart"
-        data["restart"] = "0"
-    if DEBUG and not dry_run:
-        click.echo(f"""Server version: {server_version_da}.""")
-    if dry_run:
-        show_dry_run_package_install(
-            playground=playground,
-            should_restart=should_restart,
-            archived_files=archived_files,
-            show_files=show_files,
-        )
-        return 0
-    if playground:
-        if playground != "default":
-            data["project"] = playground
-        project_endpoint = apiurl + "/api/playground/project"
-        click.secho("Checking Playground project...", fg="cyan")
-        project_list = http_get(project_endpoint, headers={"X-API-Key": apikey}, timeout=600)
-        if project_list.status_code == 200:
+    with tempfile.NamedTemporaryFile(suffix=".zip") as archive:
+        with zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w") as zf:
+            archived_files = []
             try:
-                existing_projects = project_list.json()
-            except Exception:
-                return "playground list of projects GET returned invalid JSON: " + project_list.text
-            if not playground_project_exists(existing_projects, playground):
-                try:
-                    click.secho(f'''Creating Playground project "{playground}"...''', fg="cyan")
-                    http_post(
-                        project_endpoint,
-                        data={"project": playground},
-                        headers={"X-API-Key": apikey},
-                        timeout=600,
-                    )
-                except Exception:
-                    return "create project POST returned " + project_list.text
-        else:
-            click.echo("\n")
-            return (
-                "playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text
-            )
-        try:
-            click.secho("Uploading package to Playground...", fg="cyan")
-            r = http_post(
-                apiurl + "/api/playground_install",
-                data=data,
-                files={"file": archive},
-                headers={"X-API-Key": apikey},
-                timeout=600,
-            )
-        except Exception as err:
-            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-            raise click.ClickException(f"""{err}\n""")
-        if r.status_code == 400:
-            try:
-                error_message = r.json()
-            except Exception:
-                error_message = ""
-            if "project" not in data or error_message != "Invalid project.":
-                return "playground_install POST returned " + str(r.status_code) + ": " + r.text
-            try:
-                r = http_post(
-                    apiurl + "/api/playground/project",
-                    data={"project": data["project"]},
-                    headers={"X-API-Key": apikey},
-                    timeout=600,
+                ignore_process = subprocess.run(
+                    ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
+                    capture_output=True,
+                    text=True,
+                    cwd=directory,
+                    check=False,
                 )
-            except Exception as err:
+                ignore_process.check_returncode()
+                raw_ignore = ignore_process.stdout.splitlines()
+            except (subprocess.CalledProcessError, OSError):
+                raw_ignore = []
+            to_ignore = [path.rstrip("/") for path in raw_ignore]
+            root_directory = None
+            has_python_files = False
+            this_package_name = None
+            dependencies = {}
+            for root, dirs, files in os.walk(directory, topdown=True):
+                adjusted_root = os.path.relpath(root, directory)
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d not in EXCLUDED_DIRECTORIES
+                    and not d.endswith(".egg-info")
+                    and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
+                ]
+                if root_directory is None and package_metadata_files_present(root):
+                    root_directory = root
+                    this_package_name, dependencies = load_package_metadata(root, files)
+                for the_file in files:
+                    if (
+                        the_file.endswith(("~", ".pyc", ".swp", ".tmp", ".swx"))
+                        or the_file.startswith(("#", ".#"))
+                        or ".tmp." in the_file
+                        or the_file == ".gitignore"
+                        and root_directory == root
+                        or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
+                    ):
+                        continue
+                    if (
+                        not has_python_files
+                        and the_file.endswith(".py")
+                        and not (the_file in ("setup.py", "setup.cfg", "pyproject.toml") and root == root_directory)
+                        and the_file != "__init__.py"
+                    ):
+                        has_python_files = True
+                    archived_files.append(os.path.relpath(os.path.join(root, the_file), directory))
+                    zf.write(
+                        os.path.join(root, the_file),
+                        os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")),
+                    )
+        archive.seek(0)
+        archived_files.sort()
+        if restart == "no":
+            should_restart = False
+        elif restart == "yes" or has_python_files:
+            should_restart = True
+        elif len(dependencies) > 0 or this_package_name:
+            try:
+                r = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
+            except requests.exceptions.RequestException as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
-            if r.status_code != 204:
-                return (
-                    "needed to create playground project but POST to api/playground/project returned "
-                    + str(r.status_code)
-                    + ": "
-                    + r.text
-                )
-            archive.seek(0)
+            if r.status_code != 200:
+                return "/api/package returned " + str(r.status_code) + ": " + r.text
+            installed_packages = r.json()
+            already_installed = False
+            for package_info in installed_packages:
+                package_info["alt_name"] = re.sub(r"^docassemble\.", "docassemble-", package_info["name"])
+                for dependency_name, dependency_info in dependencies.items():
+                    if dependency_name in (package_info["name"], package_info["alt_name"]):
+                        condition = True
+                        if dependency_info["operator"]:
+                            if dependency_info["operator"] == "==":
+                                condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(
+                                    dependency_info["version"]
+                                )
+                            elif dependency_info["operator"] == "<=":
+                                condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(
+                                    dependency_info["version"]
+                                )
+                            elif dependency_info["operator"] == ">=":
+                                condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(
+                                    dependency_info["version"]
+                                )
+                            elif dependency_info["operator"] == "<":
+                                condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(
+                                    dependency_info["version"]
+                                )
+                            elif dependency_info["operator"] == ">":  # pragma: no branch
+                                condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(
+                                    dependency_info["version"]
+                                )
+                        if condition:  # pragma: no branch
+                            dependency_info["installed"] = True
+                if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
+                    already_installed = True
+            should_restart = bool(
+                (not already_installed and len(dependencies) > 0)
+                or not all(item["installed"] for item in dependencies.values())
+            )
+        else:
+            should_restart = True
+        data = {}
+        if should_restart and not dry_run:
             try:
+                server_packages = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
+                if server_packages.status_code != 200:
+                    if server_packages.status_code == 403:
+                        click.secho("""\nThe API KEY is invalid.""", fg="red")
+                    server_packages.raise_for_status()
+                else:
+                    installed_packages = server_packages.json()
+                    for package in installed_packages:
+                        if package.get("name", "") == "docassemble.base":
+                            server_version_da = package.get("version", "0")
+            except requests.exceptions.RequestException as err:
+                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                raise click.ClickException(f"""{err}\n""")
+            click.secho("Server will restart.", fg="yellow")
+        if not should_restart:
+            server_version_da = "norestart"
+            data["restart"] = "0"
+        if DEBUG and not dry_run:
+            click.echo(f"""Server version: {server_version_da}.""")
+        if dry_run:
+            show_dry_run_package_install(
+                playground=playground,
+                should_restart=should_restart,
+                archived_files=archived_files,
+                show_files=show_files,
+            )
+            return 0
+        if playground:
+            if playground != "default":
+                data["project"] = playground
+            project_endpoint = apiurl + "/api/playground/project"
+            click.secho("Checking Playground project...", fg="cyan")
+            project_list = http_get(project_endpoint, headers={"X-API-Key": apikey}, timeout=600)
+            if project_list.status_code == 200:
+                try:
+                    existing_projects = project_list.json()
+                except requests.exceptions.JSONDecodeError:
+                    return "playground list of projects GET returned invalid JSON: " + project_list.text
+                if not playground_project_exists(existing_projects, playground):
+                    try:
+                        click.secho(f'''Creating Playground project "{playground}"...''', fg="cyan")
+                        http_post(
+                            project_endpoint,
+                            data={"project": playground},
+                            headers={"X-API-Key": apikey},
+                            timeout=600,
+                        )
+                    except requests.exceptions.RequestException:
+                        return "create project POST returned " + project_list.text
+            else:
+                click.echo("\n")
+                return (
+                    "playground list of projects GET returned "
+                    + str(project_list.status_code)
+                    + ": "
+                    + project_list.text
+                )
+            try:
+                click.secho("Uploading package to Playground...", fg="cyan")
                 r = http_post(
                     apiurl + "/api/playground_install",
                     data=data,
@@ -1375,63 +1338,104 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     headers={"X-API-Key": apikey},
                     timeout=600,
                 )
-            except Exception as err:
+            except requests.exceptions.RequestException as err:
                 click.secho(f"""\n{err.__class__.__name__}""", fg="red")
                 raise click.ClickException(f"""{err}\n""")
-        if r.status_code == 200:
+            if r.status_code == 400:
+                try:
+                    error_message = r.json()
+                except requests.exceptions.JSONDecodeError:
+                    error_message = ""
+                if "project" not in data or error_message != "Invalid project.":
+                    return "playground_install POST returned " + str(r.status_code) + ": " + r.text
+                try:
+                    r = http_post(
+                        apiurl + "/api/playground/project",
+                        data={"project": data["project"]},
+                        headers={"X-API-Key": apikey},
+                        timeout=600,
+                    )
+                except requests.exceptions.RequestException as err:
+                    click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                    raise click.ClickException(f"""{err}\n""")
+                if r.status_code != 204:
+                    return (
+                        "needed to create playground project but POST to api/playground/project returned "
+                        + str(r.status_code)
+                        + ": "
+                        + r.text
+                    )
+                archive.seek(0)
+                try:
+                    r = http_post(
+                        apiurl + "/api/playground_install",
+                        data=data,
+                        files={"file": archive},
+                        headers={"X-API-Key": apikey},
+                        timeout=600,
+                    )
+                except requests.exceptions.RequestException as err:
+                    click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                    raise click.ClickException(f"""{err}\n""")
+            if r.status_code == 200:
+                try:
+                    info = r.json()
+                except requests.exceptions.JSONDecodeError:
+                    return r.text
+                task_id = info["task_id"]
+                success = wait_for_server(
+                    playground=bool(playground),
+                    task_id=task_id,
+                    apikey=apikey,
+                    apiurl=apiurl,
+                    server_version_da=server_version_da,
+                )
+            elif r.status_code == 204:
+                success = True
+            else:
+                click.echo("\n")
+                return "playground_install POST returned " + str(r.status_code) + ": " + r.text
+            if success:
+                announce_installed()
+            else:
+                click.secho(
+                    f"""\n[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""",
+                    fg="red",
+                )
+                return 1
+        else:
             try:
-                info = r.json()
-            except Exception:
-                return r.text
+                r = http_post(
+                    apiurl + "/api/package",
+                    data=data,
+                    files={"zip": archive},
+                    headers={"X-API-Key": apikey},
+                    timeout=600,
+                )
+            except requests.exceptions.RequestException as err:
+                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+                raise click.ClickException(f"""{err}\n""")
+            if r.status_code != 200:
+                return "package POST returned " + str(r.status_code) + ": " + r.text
+            info = r.json()
             task_id = info["task_id"]
-            success = wait_for_server(
+            if wait_for_server(
                 playground=bool(playground),
                 task_id=task_id,
                 apikey=apikey,
                 apiurl=apiurl,
                 server_version_da=server_version_da,
-            )
-        elif r.status_code == 204:
-            success = True
-        else:
-            click.echo("\n")
-            return "playground_install POST returned " + str(r.status_code) + ": " + r.text
-        if success:
-            announce_installed()
-        else:
-            click.secho(
-                f"""\n[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""", fg="red"
-            )
-            return 1
-    else:
-        try:
-            r = http_post(
-                apiurl + "/api/package", data=data, files={"zip": archive}, headers={"X-API-Key": apikey}, timeout=600
-            )
-        except Exception as err:
-            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-            raise click.ClickException(f"""{err}\n""")
-        if r.status_code != 200:
-            return "package POST returned " + str(r.status_code) + ": " + r.text
-        info = r.json()
-        task_id = info["task_id"]
-        if wait_for_server(
-            playground=bool(playground),
-            task_id=task_id,
-            apikey=apikey,
-            apiurl=apiurl,
-            server_version_da=server_version_da,
-        ):
-            announce_installed()
-        if not should_restart:
-            try:
-                r = http_post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
-            except Exception as err:
-                click.secho(f"""\n{err.__class__.__name__}{BELL}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
-            if r.status_code != 204:
-                return "clear_cache returned " + str(r.status_code) + ": " + r.text
-    return 0
+            ):
+                announce_installed()
+            if not should_restart:
+                try:
+                    r = http_post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
+                except requests.exceptions.RequestException as err:
+                    click.secho(f"""\n{err.__class__.__name__}{BELL}""", fg="red")
+                    raise click.ClickException(f"""{err}\n""")
+                if r.status_code != 204:
+                    return "clear_cache returned " + str(r.status_code) + ": " + r.text
+        return 0
 
 
 # =============================================================================
@@ -1468,10 +1472,13 @@ def install(directory, config, project_config, api, server, playground, restart,
         click.echo(f"""Location: Playground "{playground}" """)
     if dry_run:
         click.secho(
-            f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""", fg="cyan"
+            f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
+            fg="cyan",
         )
     else:
-        click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow")
+        click.secho(
+            f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow"
+        )
     return package_installer(
         directory=directory,
         apiurl=selected_server["apiurl"],
@@ -1503,65 +1510,64 @@ def download(config, api, server, playground, overwrite, package):
     selected_server = select_server(*config, *api, server)
     package_name = normalize_package_name(package)
     package_file_name = re.sub(r"docassemble\.", "docassemble-", package_name)
-    archive = tempfile.NamedTemporaryFile(suffix=".zip")
+    with tempfile.NamedTemporaryFile(suffix=".zip") as archive:
+        try:
+            if playground:
+                params = {"folder": "packages", "filename": package_name}
+                if playground != "default":
+                    params["project"] = playground
+                response = requests.get(
+                    selected_server["apiurl"] + "/api/playground",
+                    params=params,
+                    stream=True,
+                    timeout=600,
+                    headers={"X-API-Key": selected_server["apikey"]},
+                )
+                if response.status_code == 404:
+                    return "Package not found."
+                response.raise_for_status()
+            else:
+                response = requests.get(
+                    selected_server["apiurl"] + "/api/package",
+                    headers={"X-API-Key": selected_server["apikey"]},
+                    timeout=600,
+                )
+                if response.status_code != 200:
+                    return "Unable to connect to server."
+                zip_file_number = None
+                for item in response.json():
+                    if item["name"] == package_name:
+                        zip_file_number = item.get("zip_file_number")
+                        break
+                if zip_file_number is None:
+                    return "Package installed but is not downloadable."
+                response = requests.get(
+                    selected_server["apiurl"] + "/api/file/" + str(zip_file_number),
+                    stream=True,
+                    timeout=600,
+                    headers={"X-API-Key": selected_server["apikey"]},
+                )
+                response.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            return "Error downloading package: " + str(err)
+        except requests.exceptions.RequestException as err:
+            click.secho(f"""\n{err.__class__.__name__}""", fg="red")
+            raise click.ClickException(f"""{err}\n""")
 
-    try:
-        if playground:
-            params = {"folder": "packages", "filename": package_name}
-            if playground != "default":
-                params["project"] = playground
-            response = requests.get(
-                selected_server["apiurl"] + "/api/playground",
-                params=params,
-                stream=True,
-                timeout=600,
-                headers={"X-API-Key": selected_server["apikey"]},
-            )
-            if response.status_code == 404:
-                return "Package not found."
-            response.raise_for_status()
-        else:
-            response = requests.get(
-                selected_server["apiurl"] + "/api/package",
-                headers={"X-API-Key": selected_server["apikey"]},
-                timeout=600,
-            )
-            if response.status_code != 200:
-                return "Unable to connect to server."
-            zip_file_number = None
-            for item in response.json():
-                if item["name"] == package_name:
-                    zip_file_number = item.get("zip_file_number")
-                    break
-            if zip_file_number is None:
-                return "Package installed but is not downloadable."
-            response = requests.get(
-                selected_server["apiurl"] + "/api/file/" + str(zip_file_number),
-                stream=True,
-                timeout=600,
-                headers={"X-API-Key": selected_server["apikey"]},
-            )
-            response.raise_for_status()
-    except requests.exceptions.HTTPError as err:
-        return "Error downloading package: " + str(err)
-    except Exception as err:
-        click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-        raise click.ClickException(f"""{err}\n""")
+        with open(archive.name, "wb") as fp:
+            fp.writelines(response.iter_content(8192))
 
-    with open(archive.name, "wb") as fp:
-        fp.writelines(response.iter_content(8192))
-
-    with zipfile.ZipFile(archive.name, mode="r") as zf:
-        if not overwrite:
-            for file_info in zf.infolist():
-                if os.path.exists(file_info.filename):
-                    return (
-                        "Unpacking the package here would overwrite existing files "
-                        + f"({file_info.filename}). Use --overwrite if you want to overwrite existing files."
-                    )
-        zf.extractall(path=os.getcwd())
-    click.echo(f"Unpacked {package_file_name}.")
-    return 0
+        with zipfile.ZipFile(archive.name, mode="r") as zf:
+            if not overwrite:
+                for file_info in zf.infolist():
+                    if os.path.exists(file_info.filename):
+                        return (
+                            "Unpacking the package here would overwrite existing files "
+                            + f"({file_info.filename}). Use --overwrite if you want to overwrite existing files."
+                        )
+            zf.extractall(path=os.getcwd())
+        click.echo(f"Unpacked {package_file_name}.")
+        return 0
 
 
 @cli.command(context_settings=CONTEXT_SETTINGS)
@@ -1591,7 +1597,7 @@ def uninstall(config, api, server, restart, package):
             headers={"X-API-Key": selected_server["apikey"]},
             timeout=600,
         )
-    except Exception as err:
+    except requests.exceptions.RequestException as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
         raise click.ClickException(f"""{err}\n""")
     if response.status_code != 200:
@@ -1599,7 +1605,10 @@ def uninstall(config, api, server, restart, package):
 
     info = response.json()
     if wait_for_server(False, info["task_id"], selected_server["apikey"], selected_server["apiurl"]):
-        click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Uninstalled.{BELL}""", fg="green")
+        click.secho(
+            f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Uninstalled.{BELL}""",
+            fg="green",
+        )
         return 0
     return 1
 
@@ -1617,7 +1626,7 @@ def calculate_checksum(filepath: str) -> str:
                 hasher.update(chunk)
     except FileNotFoundError:
         return ""
-    except Exception as e:
+    except OSError as e:
         click.secho(f"""{e} while calculating checksum.""", fg="red")
         return ""
     return hasher.hexdigest()
@@ -1803,7 +1812,7 @@ def watch(directory, config, project_config, api, server, playground, restart, b
         click.echo("")
 
     click.echo(f"""Watching: {directory}""")
-    click.secho(f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
+    click.secho(f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
     stop_message = """\nStopping "docassemblecli3 watch"."""
     try:
         while True:
@@ -1816,12 +1825,13 @@ def watch(directory, config, project_config, api, server, playground, restart, b
                     continue
                 if dry_run:
                     click.secho(
-                        f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
+                        f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Dry run: previewing install...""",
                         fg="cyan",
                     )
                 else:
                     click.secho(
-                        f"""[{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow"
+                        f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Installing...""",
+                        fg="yellow",
                     )
                 if restart_param == "yes" or (restart_param == "auto" and LAST_MODIFIED["restart"]):
                     effective_restart = "yes"
@@ -1863,7 +1873,7 @@ def watch(directory, config, project_config, api, server, playground, restart, b
             time.sleep(1)
     except KeyboardInterrupt:
         pass
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         click.echo(f"\nException occurred: {e}")
     finally:
         observer.stop()
@@ -1938,7 +1948,7 @@ __import__("pkg_resources").declare_namespace(__name__)
     if "MIT" in license:
         licensetext = (
             "The MIT License (MIT)\n\nCopyright (c) "
-            + str(datetime.datetime.now().year)
+            + str(datetime.datetime.now(tz=datetime.UTC).year)
             + " "
             + developer_name
             + """
@@ -2381,7 +2391,7 @@ def new(config):
     try:
         yaml.dump(env, config)
         os.chmod(config.name, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
+    except OSError:
         raise click.BadParameter("File is not usable.")
     click.echo(f"""Config created successfully: {os.path.abspath(config.name)}""")
     if click.confirm("Do you want to add a server to this new config file?", default=True):
@@ -2409,7 +2419,7 @@ def server_version(config, api, server):
         for package in installed_packages:
             if package.get("name", "") == "docassemble.base":
                 click.echo(package["version"])
-    except Exception as err:
+    except requests.exceptions.RequestException as err:
         click.secho(f"""\n{err.__class__.__name__}""", fg="red")
         raise click.ClickException(f"""{err}\n""")
 
