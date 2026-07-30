@@ -12,8 +12,8 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-import docassemblecli3
-import docassemblecli3.docassemblecli3 as mod
+import src.docassemblecli3.docassemblecli3 as mod
+from src import docassemblecli3
 
 
 class DummyResponse:
@@ -2128,7 +2128,7 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
                 "files": {str(package_dir / "file.yml"): {"modified": True}},
                 "restart": False,
             }
-            return None
+            return
         raise KeyboardInterrupt("stop")
 
     monkeypatch.setattr(mod.time, "sleep", fake_sleep)

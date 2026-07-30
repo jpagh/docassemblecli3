@@ -1,0 +1,48 @@
+[settings]
+    python.uv_venv_auto = "create|source"
+
+[tools]
+    "pipx:bump-my-version" = "latest"
+    "pipx:ruff"            = "0.15"
+    python                 = "3.12"
+    tombi                  = "latest"
+    uv                     = "latest"
+
+[tasks.check]
+    description = "Check the project"
+    depends     = ["sync"]
+    run         = [
+        "tombi lint",
+        "ruff check --fix",
+    ]
+
+[tasks.bump]
+    description = "Bump the patch version and push tags"
+    depends     = ["pre-commit"]
+    run         = "bump-my-version bump patch && git push --follow-tags"
+
+[tasks.format]
+    description = "Format the project"
+    depends     = ["sync"]
+    run         = [
+        "tombi format",
+        "ruff format",
+    ]
+
+[tasks.pre-commit]
+    description = "Lint, format, and test the project"
+    depends     = ["sync"]
+    run         = [
+        { task = "check" },
+        { task = "format" },
+        { task = "test" },
+    ]
+
+[tasks.sync]
+    description = "Synchronize the development environment"
+    run         = "uv sync"
+
+[tasks.test]
+    description = "Run the test suite"
+    depends     = ["sync"]
+    run         = "pytest"
