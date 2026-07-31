@@ -32,6 +32,7 @@ LAST_MODIFIED = {
 LAST_MODIFIED_LOCK = threading.Lock()
 FULL_INSTALL_DONE = False
 FILE_CHECKSUMS = {}
+CHUNK_SIZE = 4 * 1024 * 1024
 DEBUG = False
 BELL = "\a"
 EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
@@ -1648,7 +1649,7 @@ def calculate_checksum(filepath: str) -> str:
     hasher = xxhash.xxh64()
     try:
         with open(filepath, "rb") as f:
-            while chunk := f.read(4096):
+            while chunk := f.read(CHUNK_SIZE):
                 hasher.update(chunk)
     except FileNotFoundError:
         return ""
