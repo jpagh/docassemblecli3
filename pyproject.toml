@@ -1,6 +1,6 @@
 [project]
     name            = "docassemblecli3"
-    version         = "26.7.2"
+    version         = "26.8.0"
     description     = "Multi-platform CLI utility for working with docassemble packages and servers"
     readme          = "README.md"
     requires-python = ">= 3.12"

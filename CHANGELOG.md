@@ -10,6 +10,8 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ## Unreleased
 
+## [26.8.0] - 2026-08-06
+
 ### Added
 
 - `da watch` in Playground mode now deletes files from the Playground when you
