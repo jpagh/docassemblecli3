@@ -10,6 +10,45 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ## Unreleased
 
+### Added
+
+- `da watch` in Playground mode now deletes files from the Playground when you
+  delete them locally (deleting a module file also restarts the server), and
+  periodically removes Playground files you have deleted from your package
+  directory, so the Playground no longer accumulates orphaned files.
+- `da watch` now retries failed uploads and installs automatically, so transient
+  server or network problems resolve on their own without restarting the
+  watcher. Files that can not be read or keep changing while the package is
+  being archived are retried too, and are skipped with a warning after repeated
+  failures until they change again.
+- `da install` and `da watch` in Playground mode now stop with an error if two
+  local files in the same data folder have the same name, instead of silently
+  overwriting each other on the server (the Playground stores files flat by
+  name).
+- `da watch` now re-scans the package directory every 5 minutes by default to
+  catch changes the file-system observer missed; the interval can be set with
+  `--sweep-interval SECONDS` or the `sweep_interval` key in the `watch` section
+  of the project config.
+
+### Changed
+
+- `da watch` now uploads a file only when its content actually changed: saving
+  without changing a file (e.g. auto-save or format-on-save) no longer triggers
+  a reinstall, and after a failed install only the affected files are retried
+  instead of the whole package.
+- `da watch --dry-run` is strictly a preview and no longer sends any changes to
+  the server.
+- `da install`, `da download`, and `da uninstall` now print the reason for a
+  failure and exit with code 1 instead of failing silently or crashing with a
+  traceback.
+
+### Fixed
+
+- `da watch` no longer stops or crashes when the server returns unexpected
+  errors — it reports them and keeps watching.
+- `da watch` no longer silently skips files whose upload failed, and
+  `da uninstall` now explains why it failed instead of exiting silently.
+
 ## [26.7.2] - 2026-07-30
 
 ### Added

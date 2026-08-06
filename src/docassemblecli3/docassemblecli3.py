@@ -1,5 +1,7 @@
 import configparser
 import datetime
+import io
+import math
 import os
 import re
 import stat
@@ -9,6 +11,7 @@ import threading
 import time
 import tomllib
 import zipfile
+from dataclasses import dataclass
 from functools import wraps
 from urllib.parse import urlparse
 
@@ -30,11 +33,17 @@ LAST_MODIFIED = {
     "restart": False,
 }
 LAST_MODIFIED_LOCK = threading.Lock()
-FULL_INSTALL_DONE = False
-FILE_CHECKSUMS = {}
+WATCHED_FILES: dict[str, "WatchState"] = {}
+RETRY_QUEUE: dict[str, tuple[float, float]] = {}
+PENDING_DELETIONS: dict[str, tuple[float, float]] = {}
+UPLOADED_NAMES: dict[tuple[str, str], set[str]] = {}
 CHUNK_SIZE = 4 * 1024 * 1024
 DEBUG = False
 BELL = "\a"
+WATCH_SWEEP_INTERVAL = 300.0
+RETRY_BACKOFF_CAP = 60.0
+MAX_ARCHIVE_SKIPS = 3
+MIN_SWEEP_INTERVAL = 1.0
 EXCLUDED_DIRECTORIES = [".git", "__pycache__", ".mypy_cache", ".venv", ".history", "build"]
 WATCH_IGNORE_MTIME = None
 WATCH_SETTLE_DELAY = 0.6
@@ -92,6 +101,52 @@ var/
 wheels/
 share/python-wheels/
 """
+
+
+class DaCliError(Exception):
+    """An error that can be shown to the user without a traceback."""
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class ServerStatusError(DaCliError):
+    """The server reported that an install/restart task failed."""
+
+
+class PlaygroundNameConflictError(DaCliError):
+    """Two local files would map to the same Playground file.
+
+    Raised before any request is sent; the watch loop treats it as fatal so
+    the watcher exits instead of retrying an upload that can never succeed.
+    """
+
+
+@dataclass
+class WatchState:
+    """Per-file state maintained by the watch loop.
+
+    `uploaded_hash` is only ever set to a checksum the server confirmed it
+    received, so a file is dirty (needs upload) exactly when its current
+    checksum differs from `uploaded_hash` (or nothing was uploaded yet).
+    `checksum` is the last content hash computed; the file is re-hashed on
+    every check, so a change is always detected regardless of mtime/size
+    resolution.
+
+    `skip_count` counts consecutive install cycles in which the file was in
+    the upload batch but could not be archived; once it reaches
+    MAX_ARCHIVE_SKIPS the file is `suspended` — it is left out of upload
+    batches until its content changes again, so a file that never stops
+    changing can not keep triggering full installs. `suspended_checksum`
+    is the content at suspension time, used to detect the next change.
+    """
+
+    checksum: str
+    uploaded_hash: str | None = None
+    skip_count: int = 0
+    suspended: bool = False
+    suspended_checksum: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -446,112 +501,382 @@ def http_delete(url: str, **kwargs):
     return http_request("delete", url, **kwargs)
 
 
-def deduplicate_watch_events(file_events: dict) -> dict[str, str]:
-    deduplicated = {}
-    for file_path, event_types in file_events.items():
-        if "created" in event_types:
-            deduplicated[file_path] = "created"
-        elif "modified" in event_types:
-            deduplicated[file_path] = "modified"
-        elif "deleted" in event_types:
-            deduplicated[file_path] = "deleted"
-    return deduplicated
+def refresh_path_state(path: str) -> bool:
+    """Hash `path` and update its WatchState; return True if it is dirty.
 
-
-def filter_changed_files(file_events: dict) -> dict[str, dict]:
-    """Filter file events to those whose content actually changed.
-
-    Updates FILE_CHECKSUMS with fresh (mtime, size, checksum) tuples for kept
-    files. Deletion events pass through unchanged. Events whose file disappears
-    or whose checksum matches the cached value are dropped.
+    The file is hashed on every call — no mtime/size gate — and it is dirty
+    when its content checksum differs from the last checksum the server
+    confirmed (`uploaded_hash`), or when it has never been uploaded.
     """
-    filtered = {}
-    for path, bucket in file_events.items():
+    checksum = calculate_checksum(path)
+    if not checksum:
+        return False
+    state = WATCHED_FILES.get(path)
+    if state is None:
+        WATCHED_FILES[path] = WatchState(checksum, None)
+        return True
+    state.checksum = checksum
+    if state.suspended:
+        if checksum == state.suspended_checksum:
+            return False
+        state.suspended = False
+        state.suspended_checksum = None
+    return state.uploaded_hash is None or checksum != state.uploaded_hash
+
+
+def mark_uploaded(path: str, sent_hash: str) -> None:
+    """Record that the server confirmed `sent_hash` for `path`.
+
+    The file is re-hashed to guard against a change made while it was being
+    uploaded; if the content no longer matches what the server received, the
+    file stays dirty so the next cycle re-uploads it.
+    """
+    state = WATCHED_FILES.get(path)
+    if state is None:
+        return
+    checksum = calculate_checksum(path)
+    if not checksum:
+        return
+    state.checksum = checksum
+    if checksum == sent_hash:
+        state.uploaded_hash = sent_hash
+
+
+def handle_watch_events(events: dict[str, dict]) -> tuple[list[str], list[str]]:
+    """Apply buffered watchdog events to WATCHED_FILES.
+
+    Returns (dirty_paths, deleted_paths). Only paths whose content actually
+    differs from what the server has are reported as dirty; mtime-only
+    touches are deduplicated here.
+    """
+    dirty = []
+    deleted = []
+    for path, bucket in events.items():
         if bucket.get("deleted"):
-            filtered[path] = bucket
+            was_tracked = path in WATCHED_FILES or path in RETRY_QUEUE
+            WATCHED_FILES.pop(path, None)
+            RETRY_QUEUE.pop(path, None)
+            if was_tracked:
+                deleted.append(path)
             continue
-        new_checksum = calculate_checksum(path)
-        if not new_checksum:
-            continue
-        cached = FILE_CHECKSUMS.get(path)
-        if cached and cached[2] == new_checksum:
-            continue
-        try:
-            st = os.stat(path)
-        except OSError:
-            continue
-        FILE_CHECKSUMS[path] = (st.st_mtime, st.st_size, new_checksum)
-        filtered[path] = bucket
-    return filtered
+        if refresh_path_state(path):
+            dirty.append(path)
+    return dirty, deleted
 
 
-def classify_playground_paths(changed_files: dict[str, str]) -> dict[str, list[str]] | None:
+def backoff_paths(paths: list[str], retry_map: dict[str, tuple[float, float]], delay: float = 1.0) -> None:
+    """Schedule retries for failed uploads/deletions with exponential backoff."""
+    for path in paths:
+        existing = retry_map.get(path)
+        new_delay = min(existing[1] * 2, RETRY_BACKOFF_CAP) if existing else delay
+        retry_map[path] = (time.monotonic() + new_delay, new_delay)
+
+
+def mark_previewed(paths: list[str]) -> None:
+    """In dry-run mode, remember previewed content so previews dedupe."""
+    for path in paths:
+        state = WATCHED_FILES.get(path)
+        if state is not None:
+            state.uploaded_hash = state.checksum
+
+
+def mark_archive_uploaded(archive_map: dict[str, str], directory: str, playground: str | None) -> None:
+    """Mark tracked files as uploaded based on what a successful install sent.
+
+    The file is re-hashed and compared against the checksum the archive
+    contained; files that changed during the install keep their (dirty)
+    state so the next cycle re-uploads them. In Playground mode the ledger of
+    CLI-uploaded server names is populated for reconciliation.
+    """
+    if not archive_map:
+        return
+    archive_root = os.path.join(os.path.abspath(directory), "..")
+    for path in list(WATCHED_FILES):
+        relpath = os.path.relpath(path, archive_root)
+        archived = archive_map.get(relpath)
+        if archived is None:
+            continue
+        state = WATCHED_FILES.get(path)
+        if state is None:
+            continue
+        checksum = calculate_checksum(path)
+        if not checksum:
+            continue
+        state.checksum = checksum
+        if checksum == archived:
+            state.uploaded_hash = checksum
+            state.suspended = False
+            state.suspended_checksum = None
+        if playground:
+            folder = playground_folder_of(path)
+            if folder:
+                project = playground if playground != "default" else "default"
+                UPLOADED_NAMES.setdefault((folder, project), set()).add(server_file_name(path))
+
+
+def schedule_unconfirmed_retries(dirty_paths: list[str], archive_map: dict, directory: str) -> None:
+    """Retry the batch files a successful install could not confirm.
+
+    Files that were never archived (unreadable, or changing while the archive
+    was built) are scheduled for a backoff retry so they can not silently stay
+    stale on the server. Files that keep failing to archive are suspended
+    after MAX_ARCHIVE_SKIPS consecutive attempts and re-attempted only when
+    their content changes again, so a file that never stops changing can not
+    keep triggering full installs. Files that were archived but changed during
+    the install are left to their own events.
+    """
+    archive_root = os.path.join(os.path.abspath(directory), "..")
+    unconfirmed = []
+    for path in dirty_paths:
+        state = WATCHED_FILES.get(path)
+        if state is None:
+            continue
+        if state.uploaded_hash == state.checksum:
+            state.skip_count = 0
+            state.suspended = False
+            continue
+        if os.path.relpath(path, archive_root) in archive_map:
+            continue
+        unconfirmed.append(path)
+    retry = []
+    for path in unconfirmed:
+        state = WATCHED_FILES.get(path)
+        state.skip_count += 1
+        if state.skip_count >= MAX_ARCHIVE_SKIPS:
+            state.suspended = True
+            state.suspended_checksum = state.checksum
+            state.skip_count = 0
+            RETRY_QUEUE.pop(path, None)
+            click.secho(
+                f"{path} could not be archived after {MAX_ARCHIVE_SKIPS} attempts and will be skipped until it changes.",
+                fg="red",
+            )
+        else:
+            retry.append(path)
+    backoff_paths(retry, RETRY_QUEUE)
+
+
+def playground_folder_of(file_path: str) -> str | None:
+    """Return the Playground folder a local file belongs to, or None."""
+    normalized_path = "/".join(os.path.normpath(file_path).split(os.sep))
+    match = re.search(r"/docassemble/([^/]+)/data/([^/]+)/", normalized_path)
+    if match and match.group(2) in ("questions", "sources", "static", "templates", "modules"):
+        return match.group(2)
+    match = re.search(r"/docassemble/([^/]+)/([^/]+)\.py$", normalized_path)
+    if match:
+        return "modules"
+    return None
+
+
+def classify_playground_paths(paths: list[str]) -> dict[str, list[str]] | None:
     uploads = {"questions": [], "sources": [], "static": [], "templates": [], "modules": []}
-    for file_path, event_type in changed_files.items():
-        normalized_path = "/".join(os.path.normpath(file_path).split(os.sep))
-        if event_type == "deleted":
-            if normalized_path.endswith(".py"):
-                return None
-            continue
-        match = re.search(r"/docassemble/([^/]+)/data/([^/]+)/", normalized_path)
-        if match and match.group(2) in uploads and match.group(2) != "modules":
-            uploads[match.group(2)].append(file_path)
-            continue
-        match = re.search(r"/docassemble/([^/]+)/([^/]+)\.py$", normalized_path)
-        if match:
-            uploads["modules"].append(file_path)
-            continue
-        return None
+    for file_path in paths:
+        folder = playground_folder_of(file_path)
+        if folder is None:
+            return None
+        uploads[folder].append(file_path)
     return uploads
 
 
-def upload_playground_files(
-    apiurl: str,
-    apikey: str,
-    playground: str,
-    changed_files: dict[str, str],
-    dry_run: bool = False,
-    show_files: bool = False,
-) -> bool:
-    uploads = classify_playground_paths(changed_files)
-    if uploads is None:
-        return False
-    if dry_run:
-        show_dry_run_playground_upload(playground, uploads, show_files=show_files)
-        return True
+def server_file_name(file_path: str) -> str:
+    return os.path.basename(file_path)
 
+
+def playground_name_conflicts(paths: list[str]) -> list[tuple[str, str, str]]:
+    """Return (path_a, path_b, folder) for pairs of files that would map to the
+    same Playground file, because the Playground stores files flat by name.
+
+    Uploading either file would silently overwrite the other on the server, so
+    callers must refuse to upload before any request is sent.
+    """
+    by_name: dict[tuple[str, str], list[str]] = {}
+    for path in paths:
+        folder = playground_folder_of(path)
+        if folder is None:
+            continue
+        by_name.setdefault((folder, server_file_name(path)), []).append(path)
+    conflicts = []
+    for (folder, _name), group in by_name.items():
+        if len(group) > 1:
+            conflicts.append((group[0], group[1], folder))
+    return conflicts
+
+
+def format_playground_conflicts(conflicts: list[tuple[str, str, str]]) -> str:
+    lines = [
+        "Playground name conflict: the Playground stores files flat by name, so these files would overwrite each other on the server:"
+    ]
+    for path_a, path_b, folder in conflicts:
+        lines.append(f'  "{path_a}" and "{path_b}" both map to "{server_file_name(path_a)}" in folder "{folder}"')
+    lines.append("Rename one of the files and try again.")
+    return "\n".join(lines)
+
+
+def playground_upload_batch(
+    apiurl: str, apikey: str, playground: str, dirty_paths: list[str]
+) -> tuple[dict[str, str], list[str]]:
+    """Upload dirty files to the Playground, one request per folder.
+
+    Returns (sent_hashes, failed_paths). `sent_hashes` maps each uploaded
+    path to the checksum of the exact bytes that were sent, so the caller can
+    mark the file as uploaded without racing a file that changed mid-upload.
+    Errors are printed and collected, never raised.
+    """
+    uploads = classify_playground_paths(dirty_paths)
+    if uploads is None:
+        raise DaCliError("changed files are not all in Playground locations")
+    project = playground if playground and playground != "default" else None
+    sent_hashes: dict[str, str] = {}
+    failed: list[str] = []
     for folder in ("questions", "sources", "static", "templates", "modules"):
         files_to_upload = uploads[folder]
         if not files_to_upload:
             continue
-        for index, file_path in enumerate(files_to_upload):
-            post_data = {
-                "folder": folder,
-                "restart": "1" if folder == "modules" and index == len(files_to_upload) - 1 else "0",
-            }
-            if playground and playground != "default":
-                post_data["project"] = playground
+        contents = {}
+        missing = []
+        for file_path in files_to_upload:
             try:
                 with open(file_path, "rb") as fp:
-                    response = http_post(
-                        apiurl + "/api/playground",
-                        data=post_data,
-                        files={"file": fp},
-                        headers={"X-API-Key": apikey},
-                        timeout=600,
-                    )
-            except FileNotFoundError:
+                    data = fp.read()
+            except OSError:
+                missing.append(file_path)
                 continue
-            except requests.exceptions.RequestException as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
+            contents[file_path] = (server_file_name(file_path), data)
+        for file_path in missing:
+            failed.append(file_path)
+            click.secho(f"\nFile not found: {file_path}", fg="red")
+        if not contents:
+            continue
+        post_data = {"folder": folder, "restart": "1" if folder == "modules" else "0"}
+        if project:
+            post_data["project"] = project
+        files_param = [("files[]", (name, io.BytesIO(data))) for name, data in contents.values()]
+        try:
+            response = http_post(
+                apiurl + "/api/playground",
+                data=post_data,
+                files=files_param,
+                headers={"X-API-Key": apikey},
+                timeout=600,
+            )
+        except requests.exceptions.RequestException as err:
+            failed.extend(files_to_upload)
+            click.secho(f"\n{err.__class__.__name__}: {err}", fg="red")
+            continue
+        try:
             if response.status_code == 200:
-                info = response.json()
-                if not wait_for_server(True, info["task_id"], apikey, apiurl):
-                    return False
+                try:
+                    info = response.json()
+                except requests.exceptions.JSONDecodeError:
+                    raise DaCliError("server returned invalid JSON: " + response.text)
+                if not isinstance(info, dict):
+                    raise DaCliError("server returned non-object JSON: " + str(info))
+                task_id = info.get("task_id")
+                if task_id is None:
+                    raise DaCliError("server response missing task_id: " + str(info))
+                wait_for_server(True, task_id, apikey, apiurl)
             elif response.status_code != 204:
-                return False
-    return True
+                raise DaCliError(f"playground upload ({folder}) returned {response.status_code}: {response.text}")
+        except DaCliError as err:
+            failed.extend(files_to_upload)
+            click.secho(f"\n{err}", fg="red")
+            continue
+        for file_path, (name, data) in contents.items():
+            sent_hashes[file_path] = xxhash.xxh64(data).hexdigest()
+            UPLOADED_NAMES.setdefault((folder, project or "default"), set()).add(name)
+    return sent_hashes, failed
+
+
+def playground_delete_server_file(
+    apiurl: str, apikey: str, folder: str, filename: str, project: str | None = None
+) -> None:
+    """Delete a file from the Playground.
+
+    Deleting a nonexistent file succeeds (the endpoint is idempotent). Raises
+    DaCliError on failure; on success the name is removed from UPLOADED_NAMES.
+    """
+    params = {"folder": folder, "filename": filename, "restart": "1" if folder == "modules" else "0"}
+    if project:
+        params["project"] = project
+    try:
+        response = http_delete(apiurl + "/api/playground", params=params, headers={"X-API-Key": apikey}, timeout=600)
+    except requests.exceptions.RequestException as err:
+        raise DaCliError(f"{err.__class__.__name__}: {err}") from err
+    if response.status_code == 200:
+        try:
+            info = response.json()
+        except requests.exceptions.JSONDecodeError:
+            raise DaCliError("server returned invalid JSON: " + response.text)
+        if not isinstance(info, dict) or info.get("task_id") is None:
+            raise DaCliError("server response missing task_id: " + str(info))
+        wait_for_server(True, info["task_id"], apikey, apiurl)
+    elif response.status_code != 204:
+        raise DaCliError(f"playground delete ({folder}) returned {response.status_code}: {response.text}")
+    UPLOADED_NAMES.setdefault((folder, project or "default"), set()).discard(filename)
+
+
+def playground_delete_files(apiurl: str, apikey: str, playground: str, paths: list[str]) -> list[str]:
+    """Delete locally-deleted files from the Playground; returns failed paths."""
+    project = playground if playground and playground != "default" else None
+    failed = []
+    for path in paths:
+        folder = playground_folder_of(path)
+        if folder is None:
+            continue
+        try:
+            playground_delete_server_file(apiurl, apikey, folder, server_file_name(path), project)
+        except DaCliError as err:
+            failed.append(path)
+            click.secho(f"\n{err}", fg="red")
+    return failed
+
+
+def playground_reconcile(apiurl: str, apikey: str, playground: str) -> None:
+    """Delete Playground files this CLI uploaded that no longer exist locally.
+
+    This automates cleaning up the Playground: files the CLI itself uploaded
+    (tracked in UPLOADED_NAMES) that are still on the server but gone from the
+    package directory are deleted. Files uploaded through the web UI or other
+    means are never touched. Errors are printed and skipped.
+    """
+    project = playground if playground and playground != "default" else None
+    local_names: dict[str, set[str]] = {
+        folder: set() for folder in ("questions", "sources", "static", "templates", "modules")
+    }
+    for path in WATCHED_FILES:
+        folder = playground_folder_of(path)
+        if folder in local_names:
+            local_names[folder].add(server_file_name(path))
+    for folder in ("questions", "sources", "static", "templates", "modules"):
+        key = (folder, project or "default")
+        owned = UPLOADED_NAMES.get(key, set())
+        if not owned:
+            continue
+        params = {"folder": folder}
+        if project:
+            params["project"] = project
+        try:
+            response = http_get(apiurl + "/api/playground", params=params, headers={"X-API-Key": apikey}, timeout=600)
+        except requests.exceptions.RequestException as err:
+            click.secho(f"\n{err.__class__.__name__}: {err}", fg="red")
+            continue
+        if response.status_code != 200:
+            click.secho(f"\nplayground list ({folder}) returned {response.status_code}: {response.text}", fg="red")
+            continue
+        try:
+            server_files = response.json()
+        except requests.exceptions.JSONDecodeError:
+            click.secho(f"\nplayground list ({folder}) returned invalid JSON: {response.text}", fg="red")
+            continue
+        if not isinstance(server_files, list):
+            continue
+        for name in sorted(server_files):
+            if name in owned and name not in local_names[folder]:
+                try:
+                    playground_delete_server_file(apiurl, apikey, folder, name, project)
+                    click.secho(f"""Deleted from Playground: {name}""", fg="yellow")
+                except DaCliError as err:
+                    click.secho(f"\n{err}", fg="red")
 
 
 def validate_package_directory(ctx, param, directory: str) -> str:
@@ -762,7 +1087,7 @@ def display_project_command_sections(sections: dict[str, dict] | None) -> list[s
         if not section:
             continue
         lines.append(f"{command_name}:")
-        for key in ("server", "playground", "startup"):
+        for key in ("server", "playground", "startup", "sweep_interval"):
             if key in section:
                 lines.append(f"  {key}: {section[key]}")
     return lines
@@ -1076,6 +1401,12 @@ def apply_project_command_defaults(
 
 
 def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"):
+    """Poll the server until the install/restart task completes.
+
+    Returns None on success and raises ServerStatusError on failure, so
+    callers never have to distinguish False from error strings.
+    """
+
     def wait_for_server_response(
         playground: bool, task_id: str, apikey: str, apiurl: str, server_version_da: str = "0"
     ):
@@ -1094,10 +1425,18 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
                 tries += 1
                 continue
             if r.status_code != 200:
-                return "package_update_status returned " + str(r.status_code) + ": " + r.text
-            info = r.json()
-            if info["status"] == "completed" or info["status"] == "unknown":
-                break
+                raise ServerStatusError("server status returned " + str(r.status_code) + ": " + r.text)
+            try:
+                info = r.json()
+            except requests.exceptions.JSONDecodeError:
+                raise ServerStatusError("server returned invalid JSON for " + full_url + ": " + r.text)
+            if not isinstance(info, dict):
+                raise ServerStatusError("server returned non-object JSON for " + full_url + ": " + str(info))
+            try:
+                if info["status"] == "completed" or info["status"] == "unknown":
+                    break
+            except KeyError:
+                raise ServerStatusError("server response missing status field for " + full_url + ": " + str(info))
             time.sleep(1)
             tries += 1
         after_wait_for_server = time.time()
@@ -1107,23 +1446,22 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
                 success = True
         elif info.get("ok", False):
             success = True
-        if not (
-            server_version_da == "norestart"
-            or packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")
-        ):
+        try:
+            server_is_new_enough = packaging_version.parse(server_version_da) >= packaging_version.parse("1.5.3")
+        except packaging_version.InvalidVersion:
+            server_is_new_enough = False
+        if not (server_version_da == "norestart" or server_is_new_enough):
             if DEBUG:
                 click.echo(f"""\rPackage install duration: {(after_wait_for_server - before_wait_for_server):.2f}s""")
                 click.echo("""\rManually waiting for background processes.""")
             time.sleep(after_wait_for_server - before_wait_for_server)
         if success:
-            return True
-        click.secho("\nUnable to install package.\n", fg="red")
-        if not playground:
-            if "error_message" in info and isinstance(info["error_message"], str):
-                click.secho(info["error_message"], fg="red")
-            else:
-                click.echo(info)
-        return False
+            return
+        if not playground and "error_message" in info and isinstance(info["error_message"], str):
+            raise ServerStatusError(info["error_message"])
+        raise ServerStatusError(
+            f"server did not report a successful install (status: {info.get('status', 'unknown')!r})"
+        )
 
     def format_time(seconds):
         """Format seconds as HH:MM:SS"""
@@ -1178,27 +1516,100 @@ def wait_for_server(playground: bool, task_id: str, apikey: str, apiurl: str, se
 # -----------------------------------------------------------------------------
 
 
+def task_id_from_response(response, endpoint: str) -> str:
+    """Extract a task_id from a server response; raise DaCliError on malformed bodies."""
+    try:
+        info = response.json()
+    except requests.exceptions.JSONDecodeError:
+        raise DaCliError(endpoint + " returned invalid JSON: " + response.text)
+    if not isinstance(info, dict):
+        raise DaCliError(endpoint + " returned non-object JSON: " + str(info))
+    task_id = info.get("task_id")
+    if task_id is None:
+        raise DaCliError(endpoint + " response missing task_id: " + str(info))
+    return task_id
+
+
+def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
+    """Write one file into the zip, hashing its content.
+
+    The file is stat'ed before and after a hashing read; if it changed in
+    between it is re-read (up to three attempts). Only after the content is
+    confirmed stable is it written to the zip, and the write is verified to
+    produce the same checksum, so the archive never contains a torn snapshot
+    of a file that was being edited. Returns the checksum of exactly what
+    was archived, or None if the file could not be read.
+    """
+    arcname = os.path.relpath(full_path, os.path.join(directory, ".."))
+    for _attempt in range(3):
+        try:
+            st = os.stat(full_path)
+        except OSError as err:
+            click.secho(f"{err}", fg="red")
+            return None
+        hasher = xxhash.xxh64()
+        try:
+            with open(full_path, "rb") as fp:
+                while chunk := fp.read(CHUNK_SIZE):
+                    hasher.update(chunk)
+        except OSError as err:
+            click.secho(f"{err} while reading {full_path}.", fg="red")
+            return None
+        try:
+            st_after = os.stat(full_path)
+        except OSError:
+            continue
+        if (st.st_mtime, st.st_size) != (st_after.st_mtime, st_after.st_size):
+            continue
+        verified_hash = hasher.hexdigest()
+        write_hasher = xxhash.xxh64()
+        try:
+            with open(full_path, "rb") as fp, zf.open(arcname, "w", force_zip64=True) as dest:
+                while chunk := fp.read(CHUNK_SIZE):
+                    write_hasher.update(chunk)
+                    dest.write(chunk)
+        except OSError as err:
+            click.secho(f"{err} while archiving {full_path}.", fg="red")
+            return None
+        if write_hasher.hexdigest() == verified_hash:
+            return verified_hash
+        click.secho(f"{full_path} changed while it was being archived; skipping it.", fg="red")
+        return None
+    click.secho(f"{full_path} kept changing while it was being archived; skipping it.", fg="red")
+    return None
+
+
 def package_installer(directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False):
+    """Install the package directory on the server.
+
+    Returns an archive map {relative_path: checksum} describing exactly what
+    was uploaded ({} for a dry run), and raises DaCliError on any failure. The
+    map lets the watch loop mark files as uploaded only when the server
+    confirmed receiving their exact content.
+    """
     with tempfile.NamedTemporaryFile(suffix=".zip") as archive:
+        archive_map = {}
+        archived_files = []
+        archived_paths = []
+        skipped_files = []
+        root_directory = None
+        has_python_files = False
+        this_package_name = None
+        dependencies = {}
+        try:
+            ignore_process = subprocess.run(
+                ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
+                capture_output=True,
+                text=True,
+                cwd=directory,
+                check=False,
+            )
+            ignore_process.check_returncode()
+            raw_ignore = ignore_process.stdout.splitlines()
+        except (subprocess.CalledProcessError, OSError):
+            raw_ignore = []
+        to_ignore = [path.rstrip("/") for path in raw_ignore]
         with zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w") as zf:
-            archived_files = []
-            try:
-                ignore_process = subprocess.run(
-                    ["git", "ls-files", "-i", "--directory", "-o", "--exclude-standard"],
-                    capture_output=True,
-                    text=True,
-                    cwd=directory,
-                    check=False,
-                )
-                ignore_process.check_returncode()
-                raw_ignore = ignore_process.stdout.splitlines()
-            except (subprocess.CalledProcessError, OSError):
-                raw_ignore = []
-            to_ignore = [path.rstrip("/") for path in raw_ignore]
-            root_directory = None
-            has_python_files = False
-            this_package_name = None
-            dependencies = {}
             for root, dirs, files in os.walk(directory, topdown=True):
                 adjusted_root = os.path.relpath(root, directory)
                 dirs[:] = [
@@ -1213,9 +1624,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     this_package_name, dependencies = load_package_metadata(root, files)
                 for the_file in files:
                     if (
-                        the_file.endswith(("~", ".pyc", ".swp", ".tmp", ".swx"))
-                        or the_file.startswith(("#", ".#"))
-                        or ".tmp." in the_file
+                        is_archive_excluded(the_file)
                         or the_file == ".gitignore"
                         and root_directory == root
                         or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
@@ -1229,13 +1638,26 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                         and the_file != "__init__.py"
                     ):
                         has_python_files = True
-                    archived_files.append(os.path.relpath(os.path.join(root, the_file), directory))
-                    zf.write(
-                        os.path.join(root, the_file),
-                        os.path.relpath(os.path.join(root, the_file), os.path.join(directory, "..")),
-                    )
+                    full_path = os.path.join(root, the_file)
+                    archived = _archive_one_file(zf, full_path, directory)
+                    if archived is None:
+                        skipped_files.append(full_path)
+                        continue
+                    archive_map[os.path.relpath(full_path, os.path.join(directory, ".."))] = archived
+                    archived_files.append(os.path.relpath(full_path, directory))
+                    archived_paths.append(full_path)
         archive.seek(0)
+        if skipped_files:
+            click.secho("Files that could not be read were skipped:", fg="yellow")
+            for skipped in skipped_files:
+                click.echo("  " + skipped)
+        if not archived_files:
+            raise DaCliError("no files could be archived from the package directory")
         archived_files.sort()
+        if playground:
+            conflicts = playground_name_conflicts(archived_paths)
+            if conflicts:
+                raise PlaygroundNameConflictError(format_playground_conflicts(conflicts))
         if restart == "no":
             should_restart = False
         elif restart == "yes" or has_python_files:
@@ -1244,11 +1666,13 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             try:
                 r = http_get(apiurl + "/api/package", headers={"X-API-Key": apikey}, timeout=600)
             except requests.exceptions.RequestException as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
+                raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             if r.status_code != 200:
-                return "/api/package returned " + str(r.status_code) + ": " + r.text
-            installed_packages = r.json()
+                raise DaCliError("/api/package returned " + str(r.status_code) + ": " + r.text)
+            try:
+                installed_packages = r.json()
+            except requests.exceptions.JSONDecodeError:
+                raise DaCliError("/api/package returned invalid JSON: " + r.text)
             already_installed = False
             for package_info in installed_packages:
                 package_info["alt_name"] = re.sub(r"^docassemble\.", "docassemble-", package_info["name"])
@@ -1256,26 +1680,29 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     if dependency_name in (package_info["name"], package_info["alt_name"]):
                         condition = True
                         if dependency_info["operator"]:
-                            if dependency_info["operator"] == "==":
-                                condition = packaging_version.parse(package_info["version"]) == packaging_version.parse(
-                                    dependency_info["version"]
-                                )
-                            elif dependency_info["operator"] == "<=":
-                                condition = packaging_version.parse(package_info["version"]) <= packaging_version.parse(
-                                    dependency_info["version"]
-                                )
-                            elif dependency_info["operator"] == ">=":
-                                condition = packaging_version.parse(package_info["version"]) >= packaging_version.parse(
-                                    dependency_info["version"]
-                                )
-                            elif dependency_info["operator"] == "<":
-                                condition = packaging_version.parse(package_info["version"]) < packaging_version.parse(
-                                    dependency_info["version"]
-                                )
-                            elif dependency_info["operator"] == ">":  # pragma: no branch
-                                condition = packaging_version.parse(package_info["version"]) > packaging_version.parse(
-                                    dependency_info["version"]
-                                )
+                            try:
+                                if dependency_info["operator"] == "==":
+                                    condition = packaging_version.parse(
+                                        package_info["version"]
+                                    ) == packaging_version.parse(dependency_info["version"])
+                                elif dependency_info["operator"] == "<=":
+                                    condition = packaging_version.parse(
+                                        package_info["version"]
+                                    ) <= packaging_version.parse(dependency_info["version"])
+                                elif dependency_info["operator"] == ">=":
+                                    condition = packaging_version.parse(
+                                        package_info["version"]
+                                    ) >= packaging_version.parse(dependency_info["version"])
+                                elif dependency_info["operator"] == "<":
+                                    condition = packaging_version.parse(
+                                        package_info["version"]
+                                    ) < packaging_version.parse(dependency_info["version"])
+                                elif dependency_info["operator"] == ">":  # pragma: no branch
+                                    condition = packaging_version.parse(
+                                        package_info["version"]
+                                    ) > packaging_version.parse(dependency_info["version"])
+                            except packaging_version.InvalidVersion:
+                                condition = False
                         if condition:  # pragma: no branch
                             dependency_info["installed"] = True
                 if this_package_name and this_package_name in (package_info["name"], package_info["alt_name"]):
@@ -1293,15 +1720,18 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                 if server_packages.status_code != 200:
                     if server_packages.status_code == 403:
                         click.secho("""\nThe API KEY is invalid.""", fg="red")
-                    server_packages.raise_for_status()
-                else:
+                    raise DaCliError(
+                        "/api/package returned " + str(server_packages.status_code) + ": " + server_packages.text
+                    )
+                try:
                     installed_packages = server_packages.json()
-                    for package in installed_packages:
-                        if package.get("name", "") == "docassemble.base":
-                            server_version_da = package.get("version", "0")
+                except requests.exceptions.JSONDecodeError:
+                    raise DaCliError("/api/package returned invalid JSON: " + server_packages.text)
+                for package in installed_packages:
+                    if package.get("name", "") == "docassemble.base":
+                        server_version_da = package.get("version", "0")
             except requests.exceptions.RequestException as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
+                raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             click.secho("Server will restart.", fg="yellow")
         if not should_restart:
             server_version_da = "norestart"
@@ -1315,32 +1745,39 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                 archived_files=archived_files,
                 show_files=show_files,
             )
-            return 0
+            return {}
         if playground:
             if playground != "default":
                 data["project"] = playground
             project_endpoint = apiurl + "/api/playground/project"
             click.secho("Checking Playground project...", fg="cyan")
-            project_list = http_get(project_endpoint, headers={"X-API-Key": apikey}, timeout=600)
+            try:
+                project_list = http_get(project_endpoint, headers={"X-API-Key": apikey}, timeout=600)
+            except requests.exceptions.RequestException as err:
+                raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             if project_list.status_code == 200:
                 try:
                     existing_projects = project_list.json()
                 except requests.exceptions.JSONDecodeError:
-                    return "playground list of projects GET returned invalid JSON: " + project_list.text
+                    raise DaCliError("playground list of projects GET returned invalid JSON: " + project_list.text)
                 if not playground_project_exists(existing_projects, playground):
                     try:
                         click.secho(f'''Creating Playground project "{playground}"...''', fg="cyan")
-                        http_post(
+                        created = http_post(
                             project_endpoint,
                             data={"project": playground},
                             headers={"X-API-Key": apikey},
                             timeout=600,
                         )
-                    except requests.exceptions.RequestException:
-                        return "create project POST returned " + project_list.text
+                    except requests.exceptions.RequestException as err:
+                        raise DaCliError(f"{err.__class__.__name__}: {err}") from err
+                    if created.status_code != 204:
+                        raise DaCliError(
+                            "create project POST returned " + str(created.status_code) + ": " + created.text
+                        )
             else:
                 click.echo("\n")
-                return (
+                raise DaCliError(
                     "playground list of projects GET returned "
                     + str(project_list.status_code)
                     + ": "
@@ -1356,15 +1793,14 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     timeout=600,
                 )
             except requests.exceptions.RequestException as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
+                raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             if r.status_code == 400:
                 try:
                     error_message = r.json()
                 except requests.exceptions.JSONDecodeError:
                     error_message = ""
                 if "project" not in data or error_message != "Invalid project.":
-                    return "playground_install POST returned " + str(r.status_code) + ": " + r.text
+                    raise DaCliError("playground_install POST returned " + str(r.status_code) + ": " + r.text)
                 try:
                     r = http_post(
                         apiurl + "/api/playground/project",
@@ -1373,10 +1809,9 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                         timeout=600,
                     )
                 except requests.exceptions.RequestException as err:
-                    click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                    raise click.ClickException(f"""{err}\n""")
+                    raise DaCliError(f"{err.__class__.__name__}: {err}") from err
                 if r.status_code != 204:
-                    return (
+                    raise DaCliError(
                         "needed to create playground project but POST to api/playground/project returned "
                         + str(r.status_code)
                         + ": "
@@ -1392,34 +1827,22 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                         timeout=600,
                     )
                 except requests.exceptions.RequestException as err:
-                    click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                    raise click.ClickException(f"""{err}\n""")
+                    raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             if r.status_code == 200:
-                try:
-                    info = r.json()
-                except requests.exceptions.JSONDecodeError:
-                    return r.text
-                task_id = info["task_id"]
-                success = wait_for_server(
-                    playground=bool(playground),
+                task_id = task_id_from_response(r, "playground_install POST")
+                wait_for_server(
+                    playground=True,
                     task_id=task_id,
                     apikey=apikey,
                     apiurl=apiurl,
                     server_version_da=server_version_da,
                 )
+                announce_installed()
             elif r.status_code == 204:
-                success = True
-            else:
-                click.echo("\n")
-                return "playground_install POST returned " + str(r.status_code) + ": " + r.text
-            if success:
                 announce_installed()
             else:
-                click.secho(
-                    f"""\n[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Install failed!\n{BELL}""",
-                    fg="red",
-                )
-                return 1
+                click.echo("\n")
+                raise DaCliError("playground_install POST returned " + str(r.status_code) + ": " + r.text)
         else:
             try:
                 r = http_post(
@@ -1430,29 +1853,26 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     timeout=600,
                 )
             except requests.exceptions.RequestException as err:
-                click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-                raise click.ClickException(f"""{err}\n""")
+                raise DaCliError(f"{err.__class__.__name__}: {err}") from err
             if r.status_code != 200:
-                return "package POST returned " + str(r.status_code) + ": " + r.text
-            info = r.json()
-            task_id = info["task_id"]
-            if wait_for_server(
-                playground=bool(playground),
+                raise DaCliError("package POST returned " + str(r.status_code) + ": " + r.text)
+            task_id = task_id_from_response(r, "package POST")
+            wait_for_server(
+                playground=False,
                 task_id=task_id,
                 apikey=apikey,
                 apiurl=apiurl,
                 server_version_da=server_version_da,
-            ):
-                announce_installed()
+            )
+            announce_installed()
             if not should_restart:
                 try:
                     r = http_post(apiurl + "/api/clear_cache", headers={"X-API-Key": apikey}, timeout=600)
                 except requests.exceptions.RequestException as err:
-                    click.secho(f"""\n{err.__class__.__name__}{BELL}""", fg="red")
-                    raise click.ClickException(f"""{err}\n""")
+                    raise DaCliError(f"{err.__class__.__name__}: {err}") from err
                 if r.status_code != 204:
-                    return "clear_cache returned " + str(r.status_code) + ": " + r.text
-        return 0
+                    raise DaCliError("clear_cache returned " + str(r.status_code) + ": " + r.text)
+        return archive_map
 
 
 # =============================================================================
@@ -1498,15 +1918,20 @@ def install(directory, config, project_config, api, server, playground, no_playg
         click.secho(
             f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Installing...""", fg="yellow"
         )
-    return package_installer(
-        directory=directory,
-        apiurl=selected_server["apiurl"],
-        apikey=selected_server["apikey"],
-        playground=playground,
-        restart=restart,
-        dry_run=dry_run,
-        show_files=show_files,
-    )
+    try:
+        package_installer(
+            directory=directory,
+            apiurl=selected_server["apiurl"],
+            apikey=selected_server["apikey"],
+            playground=playground,
+            restart=restart,
+            dry_run=dry_run,
+            show_files=show_files,
+        )
+    except DaCliError as err:
+        click.secho(f"""\n{err}""", fg="red")
+        return 1
+    return 0
 
 
 @cli.command(context_settings=CONTEXT_SETTINGS)
@@ -1550,7 +1975,8 @@ def download(config, api, server, playground, no_playground, overwrite, package)
                     headers={"X-API-Key": selected_server["apikey"]},
                 )
                 if response.status_code == 404:
-                    return "Package not found."
+                    click.secho("\nPackage not found.", fg="red")
+                    return 1
                 response.raise_for_status()
             else:
                 response = http_get(
@@ -1559,14 +1985,16 @@ def download(config, api, server, playground, no_playground, overwrite, package)
                     timeout=600,
                 )
                 if response.status_code != 200:
-                    return "Unable to connect to server."
+                    click.secho("\nUnable to connect to server.", fg="red")
+                    return 1
                 zip_file_number = None
                 for item in response.json():
                     if item["name"] == package_name:
                         zip_file_number = item.get("zip_file_number")
                         break
                 if zip_file_number is None:
-                    return "Package installed but is not downloadable."
+                    click.secho("\nPackage installed but is not downloadable.", fg="red")
+                    return 1
                 response = http_get(
                     selected_server["apiurl"] + "/api/file/" + str(zip_file_number),
                     stream=True,
@@ -1575,7 +2003,8 @@ def download(config, api, server, playground, no_playground, overwrite, package)
                 )
                 response.raise_for_status()
         except requests.exceptions.HTTPError as err:
-            return "Error downloading package: " + str(err)
+            click.secho("\nError downloading package: " + str(err), fg="red")
+            return 1
         except requests.exceptions.RequestException as err:
             click.secho(f"""\n{err.__class__.__name__}""", fg="red")
             raise click.ClickException(f"""{err}\n""")
@@ -1588,10 +2017,12 @@ def download(config, api, server, playground, no_playground, overwrite, package)
             if not overwrite:
                 for file_info in zf.infolist():
                     if os.path.exists(file_info.filename):
-                        return (
-                            "Unpacking the package here would overwrite existing files "
-                            + f"({file_info.filename}). Use --overwrite if you want to overwrite existing files."
+                        click.secho(
+                            "\nUnpacking the package here would overwrite existing files "
+                            + f"({file_info.filename}). Use --overwrite if you want to overwrite existing files.",
+                            fg="red",
                         )
+                        return 1
             zf.extractall(path=os.getcwd())
         click.echo(f"Unpacked {package_file_name}.")
         return 0
@@ -1624,20 +2055,21 @@ def uninstall(config, api, server, restart, package):
             headers={"X-API-Key": selected_server["apikey"]},
             timeout=600,
         )
+        if response.status_code != 200:
+            raise DaCliError("package DELETE returned " + str(response.status_code) + ": " + response.text)
+        task_id = task_id_from_response(response, "package DELETE")
+        wait_for_server(False, task_id, selected_server["apikey"], selected_server["apiurl"])
+    except DaCliError as err:
+        click.secho(f"""\n{err}""", fg="red")
+        return 1
     except requests.exceptions.RequestException as err:
-        click.secho(f"""\n{err.__class__.__name__}""", fg="red")
-        raise click.ClickException(f"""{err}\n""")
-    if response.status_code != 200:
-        return "package DELETE returned " + str(response.status_code) + ": " + response.text
-
-    info = response.json()
-    if wait_for_server(False, info["task_id"], selected_server["apikey"], selected_server["apiurl"]):
-        click.secho(
-            f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Uninstalled.{BELL}""",
-            fg="green",
-        )
-        return 0
-    return 1
+        click.secho(f"""\n{err.__class__.__name__}: {err}""", fg="red")
+        return 1
+    click.secho(
+        f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Uninstalled.{BELL}""",
+        fg="green",
+    )
+    return 0
 
 
 # -----------------------------------------------------------------------------
@@ -1659,6 +2091,20 @@ def calculate_checksum(filepath: str) -> str:
     return hasher.hexdigest()
 
 
+def is_archive_excluded(filename: str) -> bool:
+    """Return True for files the archive builder can never upload.
+
+    These match the exclusions in package_installer (and the docassemble
+    server's own install filter), so the watcher must not track them either:
+    they could never reach the server and would otherwise be marked uploaded.
+    """
+    return (
+        filename.endswith(("~", ".pyc", ".swp", ".tmp", ".swx"))
+        or filename.startswith(("#", ".#"))
+        or ".tmp." in filename
+    )
+
+
 def scan_directory(directory):
     if DEBUG:
         click.secho("Scanning files...", fg="cyan")
@@ -1667,16 +2113,81 @@ def scan_directory(directory):
         subdirectories[:] = [d for d in subdirectories if d not in excluded_directories]
         for file in files:
             filepath = os.path.join(current_directory, file)
-            if not matches_ignore_patterns(path=filepath, directory=directory):
-                try:
-                    st = os.stat(filepath)
-                except OSError:
-                    continue
-                checksum = calculate_checksum(filepath)
-                if checksum:
-                    FILE_CHECKSUMS[filepath] = (st.st_mtime, st.st_size, checksum)
+            if matches_ignore_patterns(path=filepath, directory=directory):
+                continue
+            checksum = calculate_checksum(filepath)
+            if checksum:
+                WATCHED_FILES[filepath] = WatchState(checksum, None)
     if DEBUG:
         click.secho("Scanning complete.", fg="green")
+
+
+def resolve_sweep_interval(cli_value: float | None, selected_server: dict) -> float:
+    """Resolve the watch sweep interval: CLI flag, then project config, then default.
+
+    Values below MIN_SWEEP_INTERVAL and non-finite values (NaN, Infinity) are
+    rejected: an accidental 0 would turn the sweep into a per-cycle full-tree
+    hash, and a non-finite value would silently disable it. A CLI value that
+    is invalid raises click.BadParameter; an invalid config value falls back
+    to the default with a warning.
+    """
+    if cli_value is not None:
+        if not math.isfinite(cli_value):
+            raise click.BadParameter("--sweep-interval must be a finite number of seconds.")
+        if cli_value < MIN_SWEEP_INTERVAL:
+            raise click.BadParameter(f"--sweep-interval must be at least {MIN_SWEEP_INTERVAL:g} seconds.")
+        return cli_value
+    config_value = selected_server.get("sweep_interval")
+    if config_value is not None:
+        try:
+            interval = float(config_value)
+        except (TypeError, ValueError):
+            click.secho(
+                f"Invalid sweep_interval in config: {config_value!r}; using the default of {WATCH_SWEEP_INTERVAL:g} seconds.",
+                fg="yellow",
+            )
+            return WATCH_SWEEP_INTERVAL
+        if not math.isfinite(interval):
+            click.secho(
+                f"sweep_interval in config must be a finite number of seconds; using the default of {WATCH_SWEEP_INTERVAL:g} seconds.",
+                fg="yellow",
+            )
+            return WATCH_SWEEP_INTERVAL
+        if interval < MIN_SWEEP_INTERVAL:
+            click.secho(
+                f"sweep_interval in config must be at least {MIN_SWEEP_INTERVAL:g} seconds; using the default of {WATCH_SWEEP_INTERVAL:g} seconds.",
+                fg="yellow",
+            )
+            return WATCH_SWEEP_INTERVAL
+        return interval
+    return WATCH_SWEEP_INTERVAL
+
+
+def sweep_directory(directory: str) -> tuple[list[str], list[str]]:
+    """Re-scan the tree to catch events the observer missed.
+
+    Every file is re-hashed and reported as dirty when its content differs
+    from what the server has; tracked files that disappeared are reported as
+    deleted. Returns (dirty_paths, deleted_paths).
+    """
+    dirty = []
+    deleted = []
+    seen = set()
+    for current_directory, subdirectories, files in os.walk(directory):
+        subdirectories[:] = [d for d in subdirectories if d not in EXCLUDED_DIRECTORIES]
+        for file in files:
+            filepath = os.path.join(current_directory, file)
+            if matches_ignore_patterns(path=filepath, directory=directory):
+                continue
+            seen.add(filepath)
+            if refresh_path_state(filepath):
+                dirty.append(filepath)
+    for path in list(WATCHED_FILES):
+        if path not in seen:
+            WATCHED_FILES.pop(path, None)
+            RETRY_QUEUE.pop(path, None)
+            deleted.append(path)
+    return dirty, deleted
 
 
 def read_ignore_file(path: str) -> list[str]:
@@ -1701,6 +2212,8 @@ def load_ignore_patterns(directory: str) -> list[str]:
 
 def matches_ignore_patterns(path: str, directory: str) -> bool:
     global WATCH_IGNORE_MTIME, GITIGNORE_MTIME, GITMATCH_COMPILED, GITMATCH_DIRECTORY
+    if is_archive_excluded(os.path.basename(path)):
+        return True
     gitignore_path = os.path.join(directory, ".gitignore")
     gitignore_mtime = os.path.getmtime(gitignore_path) if os.path.exists(gitignore_path) else None
     watch_ignore_path = os.path.join(directory, WATCH_IGNORE_FILE)
@@ -1736,9 +2249,7 @@ class WatchHandler(FileSystemEventHandler):
         event_path = os.path.abspath(event.src_path)
         if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
             return
-        if event_type == "deleted":
-            FILE_CHECKSUMS.pop(event_path, None)
-        elif event_type not in ("created", "modified"):
+        if event_type not in ("created", "modified", "deleted"):
             return
 
         with LAST_MODIFIED_LOCK:
@@ -1783,8 +2294,26 @@ class WatchHandler(FileSystemEventHandler):
 )
 @click.option("--dry-run", is_flag=True, help="Show what watch would install without uploading anything.")
 @click.option("--show-files", is_flag=True, help="With --dry-run, list the files that would be uploaded.")
+@click.option(
+    "--sweep-interval",
+    metavar="SECONDS",
+    type=float,
+    default=None,
+    help="How often to re-scan the package directory for changes the file-system observer missed (default: 5 minutes). Can also be set with the sweep_interval key in the watch section of the project config.",
+)
 def watch(
-    directory, config, project_config, api, server, playground, no_playground, restart, buffer, dry_run, show_files
+    directory,
+    config,
+    project_config,
+    api,
+    server,
+    playground,
+    no_playground,
+    restart,
+    buffer,
+    dry_run,
+    show_files,
+    sweep_interval=None,
 ):
     """
     Watch a package directory and `install` any changes. Press Ctrl + c to exit.
@@ -1794,7 +2323,7 @@ def watch(
     selected_server = resolve_command_server_with_cleanup("watch", directory, config, api, server, project_config)
     restart_param = restart
     scan_directory(directory)
-    global FULL_INSTALL_DONE, LAST_MODIFIED
+    global LAST_MODIFIED
     event_handler = WatchHandler(directory=directory)
     observer = Observer()
     observer.schedule(event_handler, directory, recursive=True)
@@ -1821,41 +2350,91 @@ def watch(
     if playground:
         click.echo(f"""Location: Playground "{playground}" """)
 
-    if "startup" in selected_server and selected_server["startup"] == "install":
-        if dry_run:
-            click.secho("""Previewing startup install.""", fg="cyan")
-        else:
-            click.secho("""Installing on startup.""", fg="cyan")
-        startup_result = package_installer(
-            directory=directory,
-            apiurl=selected_server["apiurl"],
-            apikey=selected_server["apikey"],
-            playground=playground,
-            restart=restart,
-            dry_run=dry_run,
-            show_files=show_files,
-        )
-        FULL_INSTALL_DONE = startup_result == 0
-        click.echo("")
-
-    click.echo(f"""Watching: {directory}""")
-    click.secho(f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
     stop_message = """\nStopping "docassemblecli3 watch"."""
     try:
+        if playground:
+            conflicts = playground_name_conflicts(list(WATCHED_FILES))
+            if conflicts:
+                raise click.ClickException(format_playground_conflicts(conflicts))
+        if "startup" in selected_server and selected_server["startup"] == "install":
+            if dry_run:
+                click.secho("""Previewing startup install.""", fg="cyan")
+            else:
+                click.secho("""Installing on startup.""", fg="cyan")
+            try:
+                startup_map = package_installer(
+                    directory=directory,
+                    apiurl=selected_server["apiurl"],
+                    apikey=selected_server["apikey"],
+                    playground=playground,
+                    restart=restart,
+                    dry_run=dry_run,
+                    show_files=show_files,
+                )
+                if dry_run:
+                    for state in WATCHED_FILES.values():
+                        state.uploaded_hash = state.checksum
+                else:
+                    mark_archive_uploaded(startup_map, directory, playground)
+            except DaCliError as err:
+                click.secho(f"\n{err}\n", fg="red")
+            except Exception as exc:  # noqa: BLE001
+                click.secho(f"\n{exc}\n", fg="red")
+            click.echo("")
+
+        click.echo(f"""Watching: {directory}""")
+        click.secho(f"""[{datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")}] Started""", fg="green")
+
+        sweep_interval = resolve_sweep_interval(sweep_interval, selected_server)
+        last_sweep = None
         while True:
-            files_to_process = None
+            now_monotonic = time.monotonic()
+            if last_sweep is None or now_monotonic - last_sweep >= sweep_interval:
+                sweep_dirty, sweep_deleted = sweep_directory(directory)
+                if playground and not dry_run:
+                    playground_reconcile(
+                        apiurl=selected_server["apiurl"],
+                        apikey=selected_server["apikey"],
+                        playground=playground,
+                    )
+                last_sweep = now_monotonic
+            else:
+                sweep_dirty, sweep_deleted = [], []
+            events = None
             should_restart = False
             with LAST_MODIFIED_LOCK:
                 if LAST_MODIFIED["time"] and time.time() - LAST_MODIFIED["time"] >= WATCH_SETTLE_DELAY:
-                    files_to_process = LAST_MODIFIED["files"]
+                    events = LAST_MODIFIED["files"]
                     should_restart = LAST_MODIFIED["restart"]
                     LAST_MODIFIED = {"time": 0, "files": {}, "restart": False}
-            if files_to_process is None:
-                time.sleep(0.2)
-                continue
-            files_to_process = filter_changed_files(files_to_process)
-            changed_files = deduplicate_watch_events(files_to_process)
-            if not changed_files:
+            dirty = list(sweep_dirty)
+            deleted = list(sweep_deleted)
+            if events:
+                event_dirty, event_deleted = handle_watch_events(events)
+                dirty.extend(event_dirty)
+                deleted.extend(event_deleted)
+                should_restart = should_restart or any(path.endswith(".py") for path in event_dirty)
+            now_monotonic = time.monotonic()
+            for path, (due_at, _delay) in list(RETRY_QUEUE.items()):
+                if due_at <= now_monotonic:
+                    if refresh_path_state(path):
+                        dirty.append(path)
+                    del RETRY_QUEUE[path]
+            for path, (due_at, _delay) in list(PENDING_DELETIONS.items()):
+                if due_at <= now_monotonic:
+                    del PENDING_DELETIONS[path]
+                    if not os.path.exists(path):
+                        deleted.append(path)
+            dirty = list(dict.fromkeys(dirty))
+            deleted = list(dict.fromkeys(deleted))
+            if playground and dirty:
+                # A rename or new file can create a name conflict mid-session;
+                # refuse to upload anything before the remote state can be
+                # polluted by files that would overwrite each other.
+                conflicts = playground_name_conflicts(list(WATCHED_FILES))
+                if conflicts:
+                    raise click.ClickException(format_playground_conflicts(conflicts))
+            if not dirty and not deleted:
                 time.sleep(0.2)
                 continue
             if dry_run:
@@ -1873,46 +2452,83 @@ def watch(
                 time.sleep(buffer)
             else:
                 effective_restart = "no"
-            for item in changed_files:
+            for item in dirty + deleted:
                 click.echo("  " + item.replace(directory, ""))
-
-            install_result = None
-            if playground and FULL_INSTALL_DONE:
-                uploaded = upload_playground_files(
-                    apiurl=selected_server["apiurl"],
-                    apikey=selected_server["apikey"],
-                    playground=playground,
-                    changed_files=changed_files,
-                    dry_run=dry_run,
-                    show_files=show_files,
-                )
-                if uploaded:
-                    if dry_run:
-                        click.secho("Dry run: incremental Playground upload preview complete.", fg="cyan")
-                    else:
-                        announce_installed()
-                    install_result = 0
-
-            if install_result is None:
-                install_result = package_installer(
-                    directory=directory,
-                    apiurl=selected_server["apiurl"],
-                    apikey=selected_server["apikey"],
-                    playground=playground,
-                    restart=effective_restart,
-                    dry_run=dry_run,
-                    show_files=show_files,
-                )
-            FULL_INSTALL_DONE = install_result == 0
+            try:
+                if playground:
+                    if deleted and not dry_run:
+                        failed_deletes = playground_delete_files(
+                            apiurl=selected_server["apiurl"],
+                            apikey=selected_server["apikey"],
+                            playground=playground,
+                            paths=deleted,
+                        )
+                        backoff_paths(failed_deletes, PENDING_DELETIONS)
+                    if dirty:
+                        uploads = classify_playground_paths(dirty)
+                        if uploads is None:
+                            archive_map = package_installer(
+                                directory=directory,
+                                apiurl=selected_server["apiurl"],
+                                apikey=selected_server["apikey"],
+                                playground=playground,
+                                restart=effective_restart,
+                                dry_run=dry_run,
+                                show_files=show_files,
+                            )
+                            if dry_run:
+                                mark_previewed(dirty)
+                            else:
+                                mark_archive_uploaded(archive_map, directory, playground)
+                                schedule_unconfirmed_retries(dirty, archive_map, directory)
+                        elif dry_run:
+                            show_dry_run_playground_upload(playground, uploads, show_files=show_files)
+                            click.secho("Dry run: incremental Playground upload preview complete.", fg="cyan")
+                            mark_previewed(dirty)
+                        else:
+                            sent_hashes, failed = playground_upload_batch(
+                                apiurl=selected_server["apiurl"],
+                                apikey=selected_server["apikey"],
+                                playground=playground,
+                                dirty_paths=dirty,
+                            )
+                            for path, sent_hash in sent_hashes.items():
+                                mark_uploaded(path, sent_hash)
+                            backoff_paths(failed, RETRY_QUEUE)
+                            if sent_hashes and not failed:
+                                announce_installed()
+                else:
+                    if dirty:
+                        archive_map = package_installer(
+                            directory=directory,
+                            apiurl=selected_server["apiurl"],
+                            apikey=selected_server["apikey"],
+                            playground=playground,
+                            restart=effective_restart,
+                            dry_run=dry_run,
+                            show_files=show_files,
+                        )
+                        if dry_run:
+                            mark_previewed(dirty)
+                        else:
+                            mark_archive_uploaded(archive_map, directory, None)
+                            schedule_unconfirmed_retries(dirty, archive_map, directory)
+            except KeyboardInterrupt:
+                raise
+            except PlaygroundNameConflictError as err:
+                # A name conflict can not be resolved by retrying: exit the
+                # watcher so the user renames one of the files.
+                raise click.ClickException(str(err)) from err
+            except Exception as exc:  # noqa: BLE001
+                click.secho(f"\n{exc}\n", fg="red")
+                backoff_paths(dirty, RETRY_QUEUE)
+                backoff_paths(deleted, PENDING_DELETIONS)
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass
-    except Exception as e:  # noqa: BLE001
-        click.echo(f"\nException occurred: {e}")
     finally:
         observer.stop()
         observer.join()
-        FULL_INSTALL_DONE = False
     return stop_message
 
 

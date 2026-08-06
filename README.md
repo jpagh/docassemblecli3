@@ -294,6 +294,24 @@ incrementally, `watch` previews that smaller upload; otherwise it previews the
 full package install. Add `--show-files` if you also want the detailed file
 list for the preview.
 
+With `da watch --playground`, deleting a file locally also deletes it from the
+Playground (deleting a module file restarts the server), and the watcher
+periodically reconciles the Playground with your package directory, removing
+files it uploaded that no longer exist locally. Failed uploads and installs do
+not stop the watcher: they are reported and retried automatically with
+exponential backoff, and a file that can not be read or keeps changing while
+the package is being archived is retried, then skipped with a warning until it
+changes again. `da watch` also re-scans the package directory every 5 minutes by
+default to catch changes the file-system observer missed; set a different
+interval with `--sweep-interval SECONDS` or the `sweep_interval` key in the
+`watch` section of the project config (at least 1 second).
+Note that the Playground stores files flat by name, so
+`da install` and `da watch` in Playground mode stop with an error if two local
+files in the same data folder have the same name — rename one of the files and
+try again. Playground cleanup can not match file names the server sanitizes
+(e.g. names with non-ASCII characters), so such files are never deleted
+automatically; delete them from the Playground manually if needed.
+
 To exit `watch`, press **Ctrl + c**.
 
 You can run `da watch --help` to get more information about how `watch`
