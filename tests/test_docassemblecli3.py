@@ -4573,10 +4573,11 @@ def test_playground_name_conflicts_helper(tmp_path):
 
     conflicts = mod.playground_name_conflicts([str(a), str(b), str(c), str(d), str(root_file)])
     assert conflicts == [(str(a), str(b), "questions")]
-    message = mod.format_playground_conflicts(conflicts)
+    assert mod.playground_conflict_paths([str(a), str(b), str(c), str(d), str(root_file)]) == {str(a), str(b)}
+    message = mod.format_playground_conflict_skip(conflicts)
     assert "same.yml" in message
     assert "questions" in message
-    assert "Rename one of the files" in message
+    assert "will not be synced to the Playground" in message
 
 
 def test_install_command_reports_da_cli_error(tmp_path, monkeypatch, capsys):
@@ -4688,7 +4689,7 @@ def test_watch_retry_only_cycle_without_events(tmp_path, monkeypatch):
     assert result == '\nStopping "docassemblecli3 watch".'
 
 
-def test_package_installer_playground_name_conflict_blocks_upload(tmp_path, monkeypatch):
+def test_package_installer_playground_name_conflict_skips_files(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     make_package(
         package_dir,
@@ -4707,12 +4708,67 @@ def test_package_installer_playground_name_conflict_blocks_upload(tmp_path, monk
             return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
-    posts = []
-    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: posts.append(args) or DummyResponse())
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
 
-    with pytest.raises(mod.PlaygroundNameConflictError, match="Playground name conflict"):
-        mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="auto")
-    assert posts == []
+    def fake_post(url, **kwargs):
+        if url.endswith(("/api/playground/project", "/api/clear_cache")):
+            return DummyResponse(status_code=204)
+        return DummyResponse(status_code=200, json_data={"task_id": "task"})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: None)
+
+    result = mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="no")
+    assert isinstance(result, dict) and result
+    # the conflicting files are left out of the archive; everything else is not
+    assert not any("same.yml" in key for key in result)
+    assert any("setup.py" in key for key in result)
+    out = capsys.readouterr().out
+    assert "Playground name conflict" in out
+    assert "will not be synced to the Playground" in out
+
+
+def test_package_installer_playground_name_conflict_announced_once(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {
+            "docassemble/test/data/questions/a/same.yml": "---\n",
+            "docassemble/test/data/questions/b/same.yml": "---\n",
+        },
+    )
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
+
+    def fake_post(url, **kwargs):
+        if url.endswith(("/api/playground/project", "/api/clear_cache")):
+            return DummyResponse(status_code=204)
+        return DummyResponse(status_code=200, json_data={"task_id": "task"})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: None)
+
+    a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    b = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
+    result = mod.package_installer(
+        str(package_dir),
+        "https://example.com",
+        "key",
+        playground="demo",
+        restart="no",
+        announced_conflicts=frozenset({str(a), str(b)}),
+    )
+    assert isinstance(result, dict) and result
+    assert "Playground name conflict" not in capsys.readouterr().out
 
 
 def test_package_installer_non_playground_allows_same_basename(tmp_path, monkeypatch):
@@ -4747,7 +4803,7 @@ def test_package_installer_non_playground_allows_same_basename(tmp_path, monkeyp
     assert isinstance(result, dict) and result
 
 
-def test_watch_playground_startup_conflict_exits(tmp_path, monkeypatch, capsys):
+def test_watch_playground_startup_conflict_warns_and_continues(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
     a.parent.mkdir(parents=True)
@@ -4778,16 +4834,29 @@ def test_watch_playground_startup_conflict_exits(tmp_path, monkeypatch, capsys):
         "resolve_command_server",
         lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
     )
-    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: (_ for _ in ()).throw(AssertionError("no install")))
+    installs = []
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: installs.append(kwargs) or {})
 
-    with pytest.raises(click.ClickException, match="Playground name conflict"):
-        mod.watch.callback(
-            str(package_dir), ("cfg", []), False, (None, None), "", "demo", False, "auto", 0, False, False
-        )
+    # the first sweep finds both conflicting files: watch warns and keeps
+    # running instead of exiting, and uploads nothing (the conflicted files
+    # are the only dirty ones)
+    def fake_sleep(seconds):
+        raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", "demo", False, "auto", 0, False, False
+    )
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert installs == []
+    out = capsys.readouterr().out
+    assert "Playground name conflict" in out
+    assert "will not be synced to the Playground" in out
     assert observer_calls == ["start", "stop", "join"]
 
 
-def test_watch_playground_mid_session_conflict_exits_before_upload(tmp_path, monkeypatch, capsys):
+def test_watch_playground_mid_session_conflict_skips_with_warning(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
     a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
@@ -4833,14 +4902,20 @@ def test_watch_playground_mid_session_conflict_exits_before_upload(tmp_path, mon
     monkeypatch.setattr(mod, "package_installer", lambda **kwargs: (_ for _ in ()).throw(AssertionError("no install")))
 
     # file `a` was already tracked (scanned/uploaded earlier); `b` is created now,
-    # turning the folder into a name conflict mid-session
+    # turning the folder into a name conflict mid-session: watch warns, skips
+    # both conflicting files, and uploads nothing
     mod.WATCHED_FILES[str(a)] = mod.WatchState("hash", "hash")
     mod.LAST_MODIFIED = {"time": 1, "files": {str(b): {"created": True}}, "restart": False}
 
     monkeypatch.setattr(mod.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt("stop")))
 
-    with pytest.raises(click.ClickException, match="Playground name conflict"):
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", 0, False, False)
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "auto", 0, False, False
+    )
+    assert result == '\nStopping "docassemblecli3 watch".'
+    out = capsys.readouterr().out
+    assert "Playground name conflict" in out
+    assert "will not be synced to the Playground" in out
 
 
 def test_watch_backoffs_unconfirmed_files_after_successful_install(tmp_path, monkeypatch):
@@ -4978,53 +5053,84 @@ def test_watch_suspends_file_after_repeated_skips(tmp_path, monkeypatch, capsys)
     assert mod.WATCHED_FILES[str(file_path)].uploaded_hash == new_hash
 
 
-def test_watch_conflict_error_exits_instead_of_backoff(tmp_path, monkeypatch, capsys):
+def test_watch_playground_conflict_warns_once_and_uploads_others(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
-    file_path = package_dir / "a.yml"
-    file_path.write_text("content", encoding="utf-8")
-
-    observer_calls = []
+    a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    a.parent.mkdir(parents=True)
+    a.write_text("---\n", encoding="utf-8")
+    b = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
+    b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text("---\n", encoding="utf-8")
+    c = package_dir / "docassemble" / "test" / "data" / "questions" / "other.yml"
+    c.write_text("---\n", encoding="utf-8")
 
     class FakeObserver:
         def schedule(self, *args, **kwargs):
             return None
 
         def start(self):
-            observer_calls.append("start")
+            return None
 
         def stop(self):
-            observer_calls.append("stop")
+            return None
 
         def join(self):
-            observer_calls.append("join")
+            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
         "resolve_command_server",
-        lambda *args, **kwargs: {"name": "example.com", "apiurl": "https://example.com", "apikey": "key"},
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
     )
     monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
-    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
     monkeypatch.setattr(mod, "sweep_directory", lambda directory: ([], []))
+    monkeypatch.setattr(mod, "playground_reconcile", lambda **kwargs: None)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
 
-    mod.WATCHED_FILES[str(file_path)] = mod.WatchState("hash", None)
+    mod.WATCHED_FILES[str(a)] = mod.WatchState("hash", None)
+    mod.WATCHED_FILES[str(b)] = mod.WatchState("hash", None)
+    mod.WATCHED_FILES[str(c)] = mod.WatchState("hash", None)
 
+    uploads = []
     monkeypatch.setattr(
-        mod,
-        "package_installer",
-        lambda **kwargs: (_ for _ in ()).throw(mod.PlaygroundNameConflictError("Playground name conflict: a.yml")),
+        mod, "playground_upload_batch", lambda **kwargs: uploads.append(kwargs["dirty_paths"]) or ({}, [])
     )
+    monkeypatch.setattr(mod, "package_installer", lambda **kwargs: (_ for _ in ()).throw(AssertionError("no install")))
 
-    mod.LAST_MODIFIED = {"time": 1, "files": {str(file_path): {"modified": True}}, "restart": False}
-    monkeypatch.setattr(mod.time, "sleep", lambda seconds: (_ for _ in ()).throw(AssertionError("no sleep")))
+    # cycle 1: a and c are modified; a is skipped because it conflicts with b,
+    # while c uploads. cycle 2: a is modified again but the conflict set is
+    # unchanged, so the warning is not repeated and nothing is uploaded.
+    sleep_calls = {"count": 0}
 
-    with pytest.raises(click.ClickException, match="Playground name conflict"):
-        mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False)
-    assert observer_calls == ["start", "stop", "join"]
-    assert mod.RETRY_QUEUE == {}
+    def fake_sleep(seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] == 1:
+            mod.LAST_MODIFIED = {
+                "time": 1,
+                "files": {str(a): {"modified": True}, str(c): {"modified": True}},
+                "restart": False,
+            }
+        else:
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert uploads == [[str(c)]]
+    out = capsys.readouterr().out
+    assert out.count("Playground name conflict") == 1
 
 
 def test_resolve_sweep_interval_default_config_and_cli(capsys):

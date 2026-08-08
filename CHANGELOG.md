@@ -4,106 +4,73 @@
 
 All notable changes to this project will be documented in this file.
 
-This changelog was reconstructed from the repository's git tags and commit
-history on 2026-04-10. Early releases, especially before 0.2.1, include
-summaries inferred from diffs where commit messages were not descriptive.
+This changelog was reconstructed from the repository's git tags and commit history on 2026-04-10. Early releases, especially before 0.2.1, include summaries inferred from diffs where commit messages were not descriptive.
 
 ## Unreleased
+
+### Changed
+
+- `da install` and `da watch` in Playground mode no longer stop with an error when two local files in the same data folder have the same name (the Playground stores files flat by name, so they would overwrite each other there). The conflicting files are now skipped in Playground sync with a warning — package installs still include them — and everything else syncs normally. Rename or remove one of each pair to sync them to the Playground.
 
 ## [26.8.0] - 2026-08-06
 
 ### Added
 
-- `da watch` in Playground mode now deletes files from the Playground when you
-  delete them locally (deleting a module file also restarts the server), and
-  periodically removes Playground files you have deleted from your package
-  directory, so the Playground no longer accumulates orphaned files.
-- `da watch` now retries failed uploads and installs automatically, so transient
-  server or network problems resolve on their own without restarting the
-  watcher. Files that can not be read or keep changing while the package is
-  being archived are retried too, and are skipped with a warning after repeated
-  failures until they change again.
-- `da install` and `da watch` in Playground mode now stop with an error if two
-  local files in the same data folder have the same name, instead of silently
-  overwriting each other on the server (the Playground stores files flat by
-  name).
-- `da watch` now re-scans the package directory every 5 minutes by default to
-  catch changes the file-system observer missed; the interval can be set with
-  `--sweep-interval SECONDS` or the `sweep_interval` key in the `watch` section
-  of the project config.
+- `da watch` in Playground mode now deletes files from the Playground when you delete them locally (deleting a module file also restarts the server), and periodically removes Playground files you have deleted from your package directory, so the Playground no longer accumulates orphaned files.
+- `da watch` now retries failed uploads and installs automatically, so transient server or network problems resolve on their own without restarting the watcher. Files that can not be read or keep changing while the package is being archived are retried too, and are skipped with a warning after repeated failures until they change again.
+- `da install` and `da watch` in Playground mode now stop with an error if two local files in the same data folder have the same name, instead of silently overwriting each other on the server (the Playground stores files flat by name).
+- `da watch` now re-scans the package directory every 5 minutes by default to catch changes the file-system observer missed; the interval can be set with `--sweep-interval SECONDS` or the `sweep_interval` key in the `watch` section of the project config.
 
 ### Changed
 
-- `da watch` now uploads a file only when its content actually changed: saving
-  without changing a file (e.g. auto-save or format-on-save) no longer triggers
-  a reinstall, and after a failed install only the affected files are retried
-  instead of the whole package.
-- `da watch --dry-run` is strictly a preview and no longer sends any changes to
-  the server.
-- `da install`, `da download`, and `da uninstall` now print the reason for a
-  failure and exit with code 1 instead of failing silently or crashing with a
-  traceback.
+- `da watch` now uploads a file only when its content actually changed: saving without changing a file (e.g. auto-save or format-on-save) no longer triggers a reinstall, and after a failed install only the affected files are retried instead of the whole package.
+- `da watch --dry-run` is strictly a preview and no longer sends any changes to the server.
+- `da install`, `da download`, and `da uninstall` now print the reason for a failure and exit with code 1 instead of failing silently or crashing with a traceback.
 
 ### Fixed
 
-- `da watch` no longer stops or crashes when the server returns unexpected
-  errors — it reports them and keeps watching.
-- `da watch` no longer silently skips files whose upload failed, and
-  `da uninstall` now explains why it failed instead of exiting silently.
+- `da watch` no longer stops or crashes when the server returns unexpected errors — it reports them and keeps watching.
+- `da watch` no longer silently skips files whose upload failed, and `da uninstall` now explains why it failed instead of exiting silently.
 
 ## [26.7.2] - 2026-07-30
 
 ### Added
 
-- Added `--no-playground` to `install`, `watch`, `download`, and `config add` so
-  a stored Playground default can be overridden and a normal package install or
-  download can be forced.
+- Added `--no-playground` to `install`, `watch`, `download`, and `config add` so a stored Playground default can be overridden and a normal package install or download can be forced.
 
 ## [26.7.1] - 2026-07-30
 
 ### Changed
 
-- Performance improvements to the `watch` command's file monitoring. Saving a
-  file repeatedly in quick succession (for example with auto-save or
-  format-on-save) is now handled more efficiently, and fewer files are
-  re-examined when nothing meaningful has changed.
+- Performance improvements to the `watch` command's file monitoring. Saving a file repeatedly in quick succession (for example with auto-save or format-on-save) is now handled more efficiently, and fewer files are re-examined when nothing meaningful has changed.
 
 ### Fixed
 
 - Improved error handling for invalid project configuration files.
-- `da download` and `da uninstall` now use the same proxy-safe connections as
-  other commands, avoiding possible hangs behind certain HTTP/3 reverse proxies.
+- `da download` and `da uninstall` now use the same proxy-safe connections as other commands, avoiding possible hangs behind certain HTTP/3 reverse proxies.
 - `da download` now works reliably on Windows.
 - `da config new` no longer silently overwrites an existing config file.
-- `da install` now matches `watch` and only restarts the server when Python
-  files inside the `docassemble/` package directory change, so editing test
-  files no longer triggers an unnecessary restart.
-- The `watch` command now detects more rapid file changes, including edits that
-  keep the same file size.
+- `da install` now matches `watch` and only restarts the server when Python files inside the `docassemble/` package directory change, so editing test files no longer triggers an unnecessary restart.
+- The `watch` command now detects more rapid file changes, including edits that keep the same file size.
 
 ## [26.7.0] - 2026-07-11
 
 ### Fixed
 
-- No longer restarts the server when Python files outside of the docassemble
-  directory change (specifically to avoid tests causing restarts).
+- No longer restarts the server when Python files outside of the docassemble directory change (specifically to avoid tests causing restarts).
 
 ## [26.4.2] - 2026-04-10
 
 ### Fixed
 
-- Fixed Playground installs and `watch` startup installs hanging behind some
-  HTTP/3 reverse proxies by using fresh `niquests` sessions with HTTP/3 disabled
-  for CLI HTTP requests.
-- Fixed Playground project existence checks to read the API's JSON response
-  instead of testing membership on the raw HTTP response object.
+- Fixed Playground installs and `watch` startup installs hanging behind some HTTP/3 reverse proxies by using fresh `niquests` sessions with HTTP/3 disabled for CLI HTTP requests.
+- Fixed Playground project existence checks to read the API's JSON response instead of testing membership on the raw HTTP response object.
 
 ## [26.4.1] - 2026-04-04
 
 ### Added
 
-- Added dry-run install previews so uploads can be inspected before sending any
-  files.
+- Added dry-run install previews so uploads can be inspected before sending any files.
 - Expanded project configuration support with additional commands and options.
 - Added server cleanup handling in command resolution.
 - Server listings now include each server's `apiurl`.
@@ -114,8 +81,7 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Fixed
 
-- Corrected version formatting and bumpversion/Taplo configuration after the
-  CalVer transition.
+- Corrected version formatting and bumpversion/Taplo configuration after the CalVer transition.
 - Reformatted the README.
 
 ## [26.04.0] - 2026-04-03
@@ -126,25 +92,21 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Changed
 
-- Improved command resolution so project configuration can override or augment
-  the selected config file.
+- Improved command resolution so project configuration can override or augment the selected config file.
 
 ## [26.03.1] - 2026-03-25
 
 ### Added
 
-- Added `.dawatchignore` support and broader ignore-pattern handling for
-  `watch`.
+- Added `.dawatchignore` support and broader ignore-pattern handling for `watch`.
 - Added shared directory/playground CLI parameters with test coverage.
 - Added license normalization when generating package metadata.
-- Added pre-commit hooks for Ruff and Taplo, plus initial Taplo formatting
-  rules.
+- Added pre-commit hooks for Ruff and Taplo, plus initial Taplo formatting rules.
 
 ### Changed
 
 - Switched packaging to `setuptools` and modernized the publishing workflow.
-- Reorganized `pyproject.toml`, updated dependencies, raised the minimum Python
-  version to 3.12, and changed versioning to CalVer.
+- Reorganized `pyproject.toml`, updated dependencies, raised the minimum Python version to 3.12, and changed versioning to CalVer.
 - Pulled in upstream parity features while modernizing packaging and workflow.
 
 ### Fixed
@@ -161,8 +123,7 @@ summaries inferred from diffs where commit messages were not descriptive.
 ### Fixed
 
 - Normalized installation paths before matching `.gitignore` rules.
-- Switched `adjusted_root` to `os.path.relpath`, improving package installer
-  behavior across platforms and directory layouts.
+- Switched `adjusted_root` to `os.path.relpath`, improving package installer behavior across platforms and directory layouts.
 
 ## [0.5.0] - 2025-07-18
 
@@ -174,13 +135,11 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Added
 
-- Added progress and elapsed-time output while waiting for the server to finish
-  installing a package.
+- Added progress and elapsed-time output while waiting for the server to finish installing a package.
 
 ### Fixed
 
-- Removed the pinned version constraint from the GitHub Action used for PyPI
-  publishing.
+- Removed the pinned version constraint from the GitHub Action used for PyPI publishing.
 
 ## [0.3.7] - 2025-02-14
 
@@ -192,35 +151,30 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Added
 
-- Expanded `display_servers` and `watch` output to include playground,
-  directory, and startup configuration information.
+- Expanded `display_servers` and `watch` output to include playground, directory, and startup configuration information.
 
 ### Changed
 
-- Updated the README to clarify how server, directory, and playground
-  configuration interact.
+- Updated the README to clarify how server, directory, and playground configuration interact.
 
 ## [0.3.5] - 2025-02-12
 
 ### Fixed
 
-- Renamed the checksum helper and handled `PermissionError` during file
-  scanning.
+- Renamed the checksum helper and handled `PermissionError` during file scanning.
 
 ## [0.3.4] - 2025-02-06
 
 ### Added
 
-- Added directory and playground support to server selection and environment
-  update helpers.
+- Added directory and playground support to server selection and environment update helpers.
 
 ## [0.3.3] - 2025-02-05
 
 ### Added
 
 - Centralized excluded-directory handling for both `watch` and `install`.
-- Enhanced server selection to accept additional parameters and provide better
-  directory scanning feedback.
+- Enhanced server selection to accept additional parameters and provide better directory scanning feedback.
 
 ### Changed
 
@@ -253,8 +207,7 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Changed
 
-- Release housekeeping only; no additional code changes were recorded between
-  0.2.2 and 0.2.3.
+- Release housekeeping only; no additional code changes were recorded between 0.2.2 and 0.2.3.
 
 ## [0.2.2] - 2025-01-21
 
@@ -280,27 +233,22 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Added
 
-- Added checksum-based directory scanning to seed watch state before file events
-  arrive.
-- Expanded the default ignore list to cover additional temporary and editor lock
-  files.
+- Added checksum-based directory scanning to seed watch state before file events arrive.
+- Expanded the default ignore list to cover additional temporary and editor lock files.
 
 ### Changed
 
-- Updated `watch` to compare file checksums so only real file-content changes
-  trigger installs and restart decisions.
+- Updated `watch` to compare file checksums so only real file-content changes trigger installs and restart decisions.
 
 ## [0.1.0] - 2024-09-11
 
 ### Added
 
-- Made `watch` honor the package's `.gitignore`, with a fallback to the default
-  generated ignore list.
+- Made `watch` honor the package's `.gitignore`, with a fallback to the default generated ignore list.
 
 ### Changed
 
-- Clarified that the `--buffer` option only applies when a restart wait is
-  needed.
+- Clarified that the `--buffer` option only applies when a restart wait is needed.
 
 ## [0.0.5] - 2024-08-21
 
@@ -310,8 +258,7 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Changed
 
-- Synced several behaviors with upstream `docassemblecli`, including package
-  version handling, longer install timeouts, and ignore-process handling.
+- Synced several behaviors with upstream `docassemblecli`, including package version handling, longer install timeouts, and ignore-process handling.
 - Refactored manual waiting for background restart processes.
 
 ### Fixed
@@ -322,16 +269,14 @@ summaries inferred from diffs where commit messages were not descriptive.
 
 ### Fixed
 
-- Fixed a regression from 0.0.3 that raised an exception when the server did not
-  need to restart.
+- Fixed a regression from 0.0.3 that raised an exception when the server did not need to restart.
 - Corrected GitHub Actions configuration for trusted PyPI publishing.
 
 ## [0.0.3] - 2024-08-19
 
 ### Changed
 
-- Stopped manually waiting for background restart processes on docassemble
-  servers 1.5.3 and newer.
+- Stopped manually waiting for background restart processes on docassemble servers 1.5.3 and newer.
 - Updated the Python publishing workflow.
 
 ## [0.0.2] - 2024-08-17
@@ -339,11 +284,9 @@ summaries inferred from diffs where commit messages were not descriptive.
 ### Added
 
 - First tagged release of `docassemblecli3`.
-- Added a `--version` option and support for running the package with
-  `python -m docassemblecli3`.
+- Added a `--version` option and support for running the package with `python -m docassemblecli3`.
 - Added initial GitHub Actions publishing workflow support.
 
 ### Changed
 
-- Iterated on project metadata, entry points, and the build backend during the
-  first packaging setup.
+- Iterated on project metadata, entry points, and the build backend during the first packaging setup.

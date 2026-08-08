@@ -305,12 +305,15 @@ changes again. `da watch` also re-scans the package directory every 5 minutes by
 default to catch changes the file-system observer missed; set a different
 interval with `--sweep-interval SECONDS` or the `sweep_interval` key in the
 `watch` section of the project config (at least 1 second).
-Note that the Playground stores files flat by name, so
-`da install` and `da watch` in Playground mode stop with an error if two local
-files in the same data folder have the same name — rename one of the files and
-try again. Playground cleanup can not match file names the server sanitizes
-(e.g. names with non-ASCII characters), so such files are never deleted
-automatically; delete them from the Playground manually if needed.
+Note that the Playground stores files flat by name: if two local files in the
+same data folder have the same name (for example favicon sets in separate
+`static` subdirectories), `da install` and `da watch` in Playground mode warn
+that the files would overwrite each other on the server and skip them in
+Playground sync — package installs still include them, so they keep working
+when installed as a package. Rename or remove one of each pair to sync them to
+the Playground. Playground cleanup can not match file names the server
+sanitizes (e.g. names with non-ASCII characters), so such files are never
+deleted automatically; delete them from the Playground manually if needed.
 
 To exit `watch`, press **Ctrl + c**.
 

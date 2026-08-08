@@ -115,14 +115,6 @@ class ServerStatusError(DaCliError):
     """The server reported that an install/restart task failed."""
 
 
-class PlaygroundNameConflictError(DaCliError):
-    """Two local files would map to the same Playground file.
-
-    Raised before any request is sent; the watch loop treats it as fatal so
-    the watcher exits instead of retrying an upload that can never succeed.
-    """
-
-
 @dataclass
 class WatchState:
     """Per-file state maintained by the watch loop.
@@ -687,7 +679,8 @@ def playground_name_conflicts(paths: list[str]) -> list[tuple[str, str, str]]:
     same Playground file, because the Playground stores files flat by name.
 
     Uploading either file would silently overwrite the other on the server, so
-    callers must refuse to upload before any request is sent.
+    callers skip the conflicting files in Playground sync (package installs
+    are unaffected: they preserve the directory structure).
     """
     by_name: dict[tuple[str, str], list[str]] = {}
     for path in paths:
@@ -702,13 +695,18 @@ def playground_name_conflicts(paths: list[str]) -> list[tuple[str, str, str]]:
     return conflicts
 
 
-def format_playground_conflicts(conflicts: list[tuple[str, str, str]]) -> str:
+def playground_conflict_paths(paths: list[str]) -> set[str]:
+    """Return every path that participates in a Playground name conflict."""
+    return {path for pair in playground_name_conflicts(paths) for path in pair[:2]}
+
+
+def format_playground_conflict_skip(conflicts: list[tuple[str, str, str]]) -> str:
     lines = [
-        "Playground name conflict: the Playground stores files flat by name, so these files would overwrite each other on the server:"
+        "Playground name conflict: the Playground stores files flat by name, so the following files would overwrite each other on the server. They will not be synced to the Playground (package installs still include them):"
     ]
     for path_a, path_b, folder in conflicts:
         lines.append(f'  "{path_a}" and "{path_b}" both map to "{server_file_name(path_a)}" in folder "{folder}"')
-    lines.append("Rename one of the files and try again.")
+    lines.append("Rename or remove one of each pair to sync them to the Playground.")
     return "\n".join(lines)
 
 
@@ -1579,18 +1577,22 @@ def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
     return None
 
 
-def package_installer(directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False):
+def package_installer(
+    directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False, announced_conflicts=None
+):
     """Install the package directory on the server.
 
     Returns an archive map {relative_path: checksum} describing exactly what
     was uploaded ({} for a dry run), and raises DaCliError on any failure. The
     map lets the watch loop mark files as uploaded only when the server
-    confirmed receiving their exact content.
+    confirmed receiving their exact content. In Playground mode, files whose
+    names collide in the flat Playground layout are left out of the archive
+    with a warning; pass `announced_conflicts` (the set of conflicting paths
+    the caller already warned about) to suppress repeated warnings.
     """
     with tempfile.NamedTemporaryFile(suffix=".zip") as archive:
         archive_map = {}
         archived_files = []
-        archived_paths = []
         skipped_files = []
         root_directory = None
         has_python_files = False
@@ -1610,6 +1612,7 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
             raw_ignore = []
         to_ignore = [path.rstrip("/") for path in raw_ignore]
         with zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w") as zf:
+            frames = []
             for root, dirs, files in os.walk(directory, topdown=True):
                 adjusted_root = os.path.relpath(root, directory)
                 dirs[:] = [
@@ -1619,15 +1622,42 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                     and not d.endswith(".egg-info")
                     and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
                 ]
+                frames.append((root, adjusted_root, files))
+            for root, adjusted_root, files in frames:
                 if root_directory is None and package_metadata_files_present(root):
                     root_directory = root
                     this_package_name, dependencies = load_package_metadata(root, files)
+            conflicted_paths: set[str] = set()
+            if playground:
+                candidates = [
+                    os.path.join(root, the_file)
+                    for root, adjusted_root, files in frames
+                    for the_file in files
+                    if not (
+                        is_archive_excluded(the_file)
+                        or the_file == ".gitignore"
+                        and root_directory == root
+                        or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
+                    )
+                ]
+                conflicts = playground_name_conflicts(candidates)
+                if conflicts:
+                    conflicted_paths = playground_conflict_paths(candidates)
+                    unannounced = [
+                        pair
+                        for pair in conflicts
+                        if not announced_conflicts or not set(pair[:2]).issubset(announced_conflicts)
+                    ]
+                    if unannounced:
+                        click.secho(format_playground_conflict_skip(unannounced), fg="yellow")
+            for root, adjusted_root, files in frames:
                 for the_file in files:
                     if (
                         is_archive_excluded(the_file)
                         or the_file == ".gitignore"
                         and root_directory == root
                         or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
+                        or os.path.join(root, the_file) in conflicted_paths
                     ):
                         continue
                     if (
@@ -1645,7 +1675,6 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
                         continue
                     archive_map[os.path.relpath(full_path, os.path.join(directory, ".."))] = archived
                     archived_files.append(os.path.relpath(full_path, directory))
-                    archived_paths.append(full_path)
         archive.seek(0)
         if skipped_files:
             click.secho("Files that could not be read were skipped:", fg="yellow")
@@ -1654,10 +1683,6 @@ def package_installer(directory, apiurl, apikey, playground, restart, dry_run=Fa
         if not archived_files:
             raise DaCliError("no files could be archived from the package directory")
         archived_files.sort()
-        if playground:
-            conflicts = playground_name_conflicts(archived_paths)
-            if conflicts:
-                raise PlaygroundNameConflictError(format_playground_conflicts(conflicts))
         if restart == "no":
             should_restart = False
         elif restart == "yes" or has_python_files:
@@ -2351,11 +2376,16 @@ def watch(
         click.echo(f"""Location: Playground "{playground}" """)
 
     stop_message = """\nStopping "docassemblecli3 watch"."""
+    announced_conflicts: frozenset[str] = frozenset()
     try:
         if playground:
             conflicts = playground_name_conflicts(list(WATCHED_FILES))
             if conflicts:
-                raise click.ClickException(format_playground_conflicts(conflicts))
+                # The Playground stores files flat by name, so conflicting
+                # files can not both be synced; warn once and skip them
+                # (package installs still include them).
+                announced_conflicts = frozenset(playground_conflict_paths(list(WATCHED_FILES)))
+                click.secho(format_playground_conflict_skip(conflicts), fg="yellow")
         if "startup" in selected_server and selected_server["startup"] == "install":
             if dry_run:
                 click.secho("""Previewing startup install.""", fg="cyan")
@@ -2370,6 +2400,7 @@ def watch(
                     restart=restart,
                     dry_run=dry_run,
                     show_files=show_files,
+                    announced_conflicts=announced_conflicts,
                 )
                 if dry_run:
                     for state in WATCHED_FILES.values():
@@ -2428,12 +2459,19 @@ def watch(
             dirty = list(dict.fromkeys(dirty))
             deleted = list(dict.fromkeys(deleted))
             if playground and dirty:
-                # A rename or new file can create a name conflict mid-session;
-                # refuse to upload anything before the remote state can be
-                # polluted by files that would overwrite each other.
-                conflicts = playground_name_conflicts(list(WATCHED_FILES))
-                if conflicts:
-                    raise click.ClickException(format_playground_conflicts(conflicts))
+                # A rename or new file can create a name conflict mid-session.
+                # The conflicting files can not both exist in the flat
+                # Playground layout, so skip them and sync everything else;
+                # warn only when the set of conflicts changes.
+                conflicted_paths = playground_conflict_paths(list(WATCHED_FILES))
+                if frozenset(conflicted_paths) != announced_conflicts:
+                    announced_conflicts = frozenset(conflicted_paths)
+                    if announced_conflicts:
+                        click.secho(
+                            format_playground_conflict_skip(playground_name_conflicts(list(WATCHED_FILES))),
+                            fg="yellow",
+                        )
+                dirty = [path for path in dirty if path not in conflicted_paths]
             if not dirty and not deleted:
                 time.sleep(0.2)
                 continue
@@ -2475,6 +2513,7 @@ def watch(
                                 restart=effective_restart,
                                 dry_run=dry_run,
                                 show_files=show_files,
+                                announced_conflicts=announced_conflicts,
                             )
                             if dry_run:
                                 mark_previewed(dirty)
@@ -2515,10 +2554,6 @@ def watch(
                             schedule_unconfirmed_retries(dirty, archive_map, directory)
             except KeyboardInterrupt:
                 raise
-            except PlaygroundNameConflictError as err:
-                # A name conflict can not be resolved by retrying: exit the
-                # watcher so the user renames one of the files.
-                raise click.ClickException(str(err)) from err
             except Exception as exc:  # noqa: BLE001
                 click.secho(f"\n{exc}\n", fg="red")
                 backoff_paths(dirty, RETRY_QUEUE)
