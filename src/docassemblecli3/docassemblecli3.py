@@ -691,7 +691,12 @@ def playground_name_conflicts(paths: list[str]) -> list[tuple[str, str, str]]:
     conflicts = []
     for (folder, _name), group in by_name.items():
         if len(group) > 1:
-            conflicts.append((group[0], group[1], folder))
+            # every member of the group conflicts with every other, so all
+            # pairs are reported: the skip set and the warning must cover
+            # every same-named file, not just the first two
+            for i, path_a in enumerate(group):
+                for path_b in group[i + 1 :]:
+                    conflicts.append((path_a, path_b, folder))
     return conflicts
 
 
@@ -1681,6 +1686,11 @@ def package_installer(
             for skipped in skipped_files:
                 click.echo("  " + skipped)
         if not archived_files:
+            if conflicted_paths:
+                raise DaCliError(
+                    "no files could be archived from the package directory "
+                    "(every file was skipped because of Playground name conflicts)"
+                )
             raise DaCliError("no files could be archived from the package directory")
         archived_files.sort()
         if restart == "no":
@@ -2220,12 +2230,66 @@ def read_ignore_file(path: str) -> list[str]:
         return [line.rstrip("\r\n") for line in file]
 
 
+def _translate_nested_gitignore_pattern(pattern: str, relative_directory: str) -> str:
+    """Translate one pattern from a nested .gitignore to be relative to the
+    package root, keeping git's semantics: a pattern without a slash matches
+    at any depth below the .gitignore's own directory, while an anchored one
+    (leading slash or containing slash) is fixed to that directory. Negation
+    and directory-only patterns pass through unchanged.
+    """
+    prefix = ""
+    if pattern.startswith("!"):
+        prefix = "!"
+        pattern = pattern[1:]
+    if not pattern or pattern.startswith("#"):
+        return prefix + pattern
+    dir_only = pattern.endswith("/")
+    if dir_only:
+        pattern = pattern[:-1]
+    if pattern.startswith("/"):
+        translated = relative_directory + pattern
+    elif pattern.startswith("**/") or "/" in pattern:
+        translated = relative_directory + "/" + pattern
+    else:
+        translated = relative_directory + "/**/" + pattern
+    return prefix + translated + ("/" if dir_only else "")
+
+
+def nested_gitignore_patterns(directory: str) -> list[str]:
+    """Collect patterns from .gitignore files below `directory` (excluding the
+    root one), translated to be relative to `directory`.
+
+    The archive builder excludes files git ignores — nested .gitignore files
+    included, via `git ls-files -i -o` — so the watcher must ignore the same
+    files. A file the watcher tracks but the archive can never include stays
+    dirty forever and keeps triggering full installs until the archive-skip
+    suspension kicks in.
+    """
+    patterns: list[str] = []
+    root_gitignore = os.path.abspath(os.path.join(directory, ".gitignore"))
+    for current_directory, subdirectories, files in os.walk(directory):
+        subdirectories[:] = [d for d in subdirectories if d not in EXCLUDED_DIRECTORIES]
+        if ".gitignore" not in files:
+            continue
+        gitignore_path = os.path.abspath(os.path.join(current_directory, ".gitignore"))
+        if gitignore_path == root_gitignore:
+            continue
+        relative_directory = os.path.relpath(current_directory, directory).replace(os.sep, "/")
+        patterns.extend(
+            _translate_nested_gitignore_pattern(pattern, relative_directory)
+            for pattern in read_ignore_file(gitignore_path)
+        )
+    return patterns
+
+
 def load_ignore_patterns(directory: str) -> list[str]:
     gitignore_path = os.path.join(directory, ".gitignore")
     if os.path.exists(gitignore_path):
         ignore_patterns = read_ignore_file(gitignore_path)
     else:
         ignore_patterns = GITIGNORE.split("\n")
+
+    ignore_patterns.extend(nested_gitignore_patterns(directory))
 
     watch_ignore_path = os.path.join(directory, WATCH_IGNORE_FILE)
     if os.path.exists(watch_ignore_path):
@@ -2272,6 +2336,11 @@ class WatchHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         event_path = os.path.abspath(event.src_path)
+        if os.path.basename(event_path) == ".gitignore":
+            # Nested .gitignore files are collected when the ignore matcher
+            # is compiled, so any change to one must invalidate the cache.
+            global GITMATCH_COMPILED
+            GITMATCH_COMPILED = None
         if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
             return
         if event_type not in ("created", "modified", "deleted"):
@@ -2471,7 +2540,15 @@ def watch(
                             format_playground_conflict_skip(playground_name_conflicts(list(WATCHED_FILES))),
                             fg="yellow",
                         )
-                dirty = [path for path in dirty if path not in conflicted_paths]
+                # A file whose Playground name has an unconfirmed delete pending
+                # must not upload: the retried delete would remove the copy it
+                # just wrote. Defer it until the delete is confirmed.
+                pending_names = {server_file_name(path) for path in PENDING_DELETIONS}
+                dirty = [
+                    path
+                    for path in dirty
+                    if path not in conflicted_paths and server_file_name(path) not in pending_names
+                ]
             if not dirty and not deleted:
                 time.sleep(0.2)
                 continue

@@ -1159,6 +1159,60 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"deleted": True}}, "restart": True}
 
 
+def test_nested_gitignore_patterns_are_honored(tmp_path):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / ".gitignore").write_text("", encoding="utf-8")
+
+    # The scenario that produced a re-install loop: a harness directory whose
+    # nested .gitignore ignores everything inside it. The archive builder
+    # excludes the file (git ignores it), so the watcher must too.
+    omp_dir = package_dir / ".omp"
+    omp_dir.mkdir()
+    (omp_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+    (omp_dir / "lsp.json").write_text("{}", encoding="utf-8")
+
+    sub_dir = package_dir / "sub"
+    sub_dir.mkdir()
+    (sub_dir / ".gitignore").write_text("*.log\n/anchored.txt\n!keep.log\n", encoding="utf-8")
+    (sub_dir / "deep").mkdir(parents=True)
+
+    mod.GITMATCH_COMPILED = None
+    assert bool(mod.matches_ignore_patterns(str(omp_dir / "lsp.json"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "a.log"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "deep" / "b.log"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(package_dir / "other" / "a.log"), str(package_dir))) is False
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "anchored.txt"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "deep" / "anchored.txt"), str(package_dir))) is False
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "keep.log"), str(package_dir))) is False
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "note.txt"), str(package_dir))) is False
+
+    data_dir = package_dir / "data"
+    data_dir.mkdir()
+    (data_dir / ".gitignore").write_text("logs/\n", encoding="utf-8")
+    (data_dir / "logs").mkdir()
+    (data_dir / "logs" / "x.txt").write_text("x", encoding="utf-8")
+    mod.GITMATCH_COMPILED = None
+    assert bool(mod.matches_ignore_patterns(str(data_dir / "logs" / "x.txt"), str(package_dir))) is True
+
+    # A nested .gitignore created mid-session is honored once the matcher is
+    # invalidated (as the WatchHandler does on .gitignore events).
+    late_dir = package_dir / "late"
+    late_dir.mkdir()
+    (late_dir / ".gitignore").write_text("new.txt\n", encoding="utf-8")
+    (late_dir / "new.txt").write_text("x", encoding="utf-8")
+    assert bool(mod.matches_ignore_patterns(str(late_dir / "new.txt"), str(package_dir))) is False
+    mod.GITMATCH_COMPILED = None
+    assert bool(mod.matches_ignore_patterns(str(late_dir / "new.txt"), str(package_dir))) is True
+
+    # scan_directory must not track git-ignored files at all, so they can
+    # never become dirty and trigger installs.
+    mod.GITMATCH_COMPILED = None
+    mod.scan_directory(str(package_dir))
+    assert str(omp_dir / "lsp.json") not in mod.WATCHED_FILES
+    assert str(sub_dir / "a.log") not in mod.WATCHED_FILES
+
+
 def test_watch_command(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -4580,6 +4634,27 @@ def test_playground_name_conflicts_helper(tmp_path):
     assert "will not be synced to the Playground" in message
 
 
+def test_playground_conflicts_cover_every_same_named_file(tmp_path):
+    root = tmp_path / "docassemble" / "test" / "data" / "questions"
+    paths = []
+    for letter in ("a", "b", "c"):
+        p = root / letter / "same.yml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("---\n", encoding="utf-8")
+        paths.append(str(p))
+    unique = root / "a" / "unique.yml"
+    unique.write_text("---\n", encoding="utf-8")
+
+    all_paths = paths + [str(unique)]
+    conflicts = mod.playground_name_conflicts(all_paths)
+    assert len(conflicts) == 3
+    assert mod.playground_conflict_paths(all_paths) == set(paths)
+    message = mod.format_playground_conflict_skip(conflicts)
+    pair_lines = [line for line in message.splitlines() if line.startswith('  "')]
+    assert len(pair_lines) == 3
+    assert all(path in message for path in paths)
+
+
 def test_install_command_reports_da_cli_error(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -5051,6 +5126,137 @@ def test_watch_suspends_file_after_repeated_skips(tmp_path, monkeypatch, capsys)
     mod.watch.callback(str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False)
     assert mod.WATCHED_FILES[str(file_path)].suspended is False
     assert mod.WATCHED_FILES[str(file_path)].uploaded_hash == new_hash
+
+
+def test_watch_playground_conflicted_sibling_deleted_survivor_uploads(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    a.parent.mkdir(parents=True)
+    a.write_text("---\n", encoding="utf-8")
+    b = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
+    b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text("---\n", encoding="utf-8")
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+    monkeypatch.setattr(mod, "sweep_directory", lambda directory: ([], []))
+    monkeypatch.setattr(mod, "playground_reconcile", lambda **kwargs: None)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
+
+    mod.WATCHED_FILES[str(a)] = mod.WatchState("hash", None)
+    mod.WATCHED_FILES[str(b)] = mod.WatchState("hash", None)
+
+    uploads = []
+    deletes = []
+    monkeypatch.setattr(
+        mod, "playground_upload_batch", lambda **kwargs: uploads.append(kwargs["dirty_paths"]) or ({}, [])
+    )
+    monkeypatch.setattr(mod, "playground_delete_files", lambda **kwargs: deletes.append(kwargs["paths"]) or [])
+
+    # b is deleted locally, which resolves the conflict: a uploads and b's
+    # shared Playground name is deleted
+    mod.LAST_MODIFIED = {
+        "time": 1,
+        "files": {str(a): {"modified": True}, str(b): {"deleted": True}},
+        "restart": False,
+    }
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt("stop")))
+
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert deletes == [[str(b)]]
+    assert uploads == [[str(a)]]
+
+
+def test_watch_playground_pending_delete_defers_same_name_upload(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    a.parent.mkdir(parents=True)
+    a.write_text("---\n", encoding="utf-8")
+    other = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("---\n", encoding="utf-8")
+
+    class FakeObserver:
+        def schedule(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+    monkeypatch.setattr(
+        mod,
+        "resolve_command_server",
+        lambda *args, **kwargs: {
+            "name": "example.com",
+            "apiurl": "https://example.com",
+            "apikey": "key",
+            "directory": str(package_dir),
+            "playground": "stored-playground",
+        },
+    )
+    monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+    monkeypatch.setattr(mod, "sweep_directory", lambda directory: ([], []))
+    monkeypatch.setattr(mod, "playground_reconcile", lambda **kwargs: None)
+    monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
+
+    # a is tracked and dirty; the same-named `other` is gone from disk but its
+    # Playground delete has not been confirmed yet, so uploading a now would
+    # let the pending delete retry remove the copy a just wrote
+    mod.WATCHED_FILES[str(a)] = mod.WatchState("hash", None)
+    mod.PENDING_DELETIONS[str(other)] = (mod.time.monotonic() + 1000, 1.0)
+
+    uploads = []
+    monkeypatch.setattr(
+        mod, "playground_upload_batch", lambda **kwargs: uploads.append(kwargs["dirty_paths"]) or ({}, [])
+    )
+
+    mod.LAST_MODIFIED = {"time": 1, "files": {str(a): {"modified": True}}, "restart": False}
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt("stop")))
+
+    result = mod.watch.callback(
+        str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+    )
+    assert result == '\nStopping "docassemblecli3 watch".'
+    assert uploads == []
+    assert mod.WATCHED_FILES[str(a)].uploaded_hash is None
 
 
 def test_watch_playground_conflict_warns_once_and_uploads_others(tmp_path, monkeypatch, capsys):

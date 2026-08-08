@@ -12,6 +12,10 @@ This changelog was reconstructed from the repository's git tags and commit histo
 
 - `da install` and `da watch` in Playground mode no longer stop with an error when two local files in the same data folder have the same name (the Playground stores files flat by name, so they would overwrite each other there). The conflicting files are now skipped in Playground sync with a warning — package installs still include them — and everything else syncs normally. Rename or remove one of each pair to sync them to the Playground.
 
+### Fixed
+
+- `da watch` now honors `.gitignore` files in subdirectories of the package, matching the package archive builder (which excludes git-ignored files). Previously a file ignored by a nested `.gitignore` was watched but could never be archived, so it stayed dirty and triggered repeated full installs until the retry/skip suspension kicked in.
+
 ## [26.8.0] - 2026-08-06
 
 ### Added
