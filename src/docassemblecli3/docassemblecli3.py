@@ -730,7 +730,8 @@ def format_playground_conflict_skip(conflicts: list[tuple[str, str, str]]) -> st
         by_name.setdefault((folder, server_file_name(path_a)), set()).update((path_a, path_b))
     for (folder, name), paths in sorted(by_name.items()):
         quoted = ", ".join(f'"{path}"' for path in sorted(paths))
-        lines.append(f'  {quoted} all map to "{name}" in folder "{folder}"')
+        quantifier = "both" if len(paths) == 2 else "all"
+        lines.append(f'  {quoted} {quantifier} map to "{name}" in folder "{folder}"')
     lines.append("Rename or remove one of each pair to sync them to the Playground.")
     return "\n".join(lines)
 
