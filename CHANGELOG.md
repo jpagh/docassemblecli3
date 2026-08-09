@@ -8,6 +8,8 @@ This changelog was reconstructed from the repository's git tags and commit histo
 
 ## Unreleased
 
+## [26.8.1] - 2026-08-09
+
 ### Changed
 
 - `da install` and `da watch` in Playground mode no longer stop with an error when two local files in the same data folder have the same name (the Playground stores files flat by name, so they would overwrite each other there). The conflicting files are now skipped in Playground sync with a warning — package installs still include them — and everything else syncs normally. Rename or remove one of each pair to sync them to the Playground.
