@@ -4717,8 +4717,10 @@ def test_playground_conflicts_cover_every_same_named_file(tmp_path):
     assert len(conflicts) == 3
     assert mod.playground_conflict_paths(all_paths) == set(paths)
     message = mod.format_playground_conflict_skip(conflicts)
-    pair_lines = [line for line in message.splitlines() if line.startswith('  "')]
-    assert len(pair_lines) == 3
+    conflict_lines = [line for line in message.splitlines() if line.startswith('  "')]
+    # one warning line per conflicting name, listing every participant,
+    # instead of one line per pair
+    assert len(conflict_lines) == 1
     assert all(path in message for path in paths)
 
 

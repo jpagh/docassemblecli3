@@ -718,10 +718,18 @@ def _readable_paths(paths: list[str]) -> list[str]:
 
 def format_playground_conflict_skip(conflicts: list[tuple[str, str, str]]) -> str:
     lines = [
-        "Playground name conflict: the Playground stores files flat by name, so the following files would overwrite each other on the server. They will not be synced to the Playground (package installs still include them):"
+        (
+            "Playground name conflict: the Playground stores files flat by name, so the "
+            "following files would overwrite each other on the server. They will not be "
+            "synced to the Playground (package installs still include them):"
+        )
     ]
+    by_name: dict[tuple[str, str], set[str]] = {}
     for path_a, path_b, folder in conflicts:
-        lines.append(f'  "{path_a}" and "{path_b}" both map to "{server_file_name(path_a)}" in folder "{folder}"')
+        by_name.setdefault((folder, server_file_name(path_a)), set()).update((path_a, path_b))
+    for (folder, name), paths in sorted(by_name.items()):
+        quoted = ", ".join(f'"{path}"' for path in sorted(paths))
+        lines.append(f'  {quoted} all map to "{name}" in folder "{folder}"')
     lines.append("Rename or remove one of each pair to sync them to the Playground.")
     return "\n".join(lines)
 
@@ -1614,6 +1622,19 @@ def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
     return None
 
 
+def _is_excluded(
+    the_file: str, root: str, adjusted_root: str, root_directory: str | None, to_ignore: list[str]
+) -> bool:
+    """Return whether `the_file` is left out of the package archive: an
+    archive-excluded extension, the root .gitignore file itself, or a path
+    git ignores (via `git ls-files -i -o`)."""
+    return bool(
+        is_archive_excluded(the_file)
+        or (the_file == ".gitignore" and root == root_directory)
+        or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
+    )
+
+
 def package_installer(
     directory, apiurl, apikey, playground, restart, dry_run=False, show_files=False, announced_conflicts=None
 ):
@@ -1649,7 +1670,7 @@ def package_installer(
             raw_ignore = []
         to_ignore = [path.rstrip("/") for path in raw_ignore]
         with zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode="w") as zf:
-            frames = []
+            walked_dirs = []
             for root, dirs, files in os.walk(directory, topdown=True):
                 adjusted_root = os.path.relpath(root, directory)
                 dirs[:] = [
@@ -1659,23 +1680,18 @@ def package_installer(
                     and not d.endswith(".egg-info")
                     and os.path.normpath(os.path.join(adjusted_root, d)) not in to_ignore
                 ]
-                frames.append((root, adjusted_root, files))
-            for root, adjusted_root, files in frames:
+                walked_dirs.append((root, adjusted_root, files))
+            for root, adjusted_root, files in walked_dirs:
                 if root_directory is None and package_metadata_files_present(root):
                     root_directory = root
                     this_package_name, dependencies = load_package_metadata(root, files)
-            conflicted_paths: set[str] = set()
+            conflict_skip_paths: set[str] = set()
             if playground:
                 candidates = [
                     os.path.join(root, the_file)
-                    for root, adjusted_root, files in frames
+                    for root, adjusted_root, files in walked_dirs
                     for the_file in files
-                    if not (
-                        is_archive_excluded(the_file)
-                        or the_file == ".gitignore"
-                        and root_directory == root
-                        or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
-                    )
+                    if not _is_excluded(the_file, root, adjusted_root, root_directory, to_ignore)
                     # A file that can not be read never reaches the server, so
                     # it must not count as a conflict participant: it would
                     # only keep its readable same-named sibling from syncing.
@@ -1687,9 +1703,9 @@ def package_installer(
                     # conflicting. A candidate that can not be read (or keeps
                     # changing) is skipped and reported, and its readable
                     # same-named sibling is released to sync normally.
-                    conflicted_paths = playground_conflict_paths(candidates)
+                    all_conflicted = playground_conflict_paths(candidates)
                     would_archive: set[str] = set()
-                    for full_path in sorted(conflicted_paths):
+                    for full_path in sorted(all_conflicted):
                         if _stable_checksum(full_path) is not None:
                             would_archive.add(full_path)
                         else:
@@ -1705,15 +1721,12 @@ def package_installer(
                     # The main loop skips the files that are still conflicted
                     # plus the ones that failed the readiness pass (already
                     # reported); released files archive normally.
-                    conflicted_paths = still_conflicted | (conflicted_paths - would_archive)
-            for root, adjusted_root, files in frames:
+                    conflict_skip_paths = still_conflicted | (all_conflicted - would_archive)
+            for root, adjusted_root, files in walked_dirs:
                 for the_file in files:
                     if (
-                        is_archive_excluded(the_file)
-                        or the_file == ".gitignore"
-                        and root_directory == root
-                        or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
-                        or os.path.join(root, the_file) in conflicted_paths
+                        _is_excluded(the_file, root, adjusted_root, root_directory, to_ignore)
+                        or os.path.join(root, the_file) in conflict_skip_paths
                     ):
                         continue
                     if (
@@ -1737,10 +1750,10 @@ def package_installer(
             for skipped in skipped_files:
                 click.echo("  " + skipped)
         if not archived_files:
-            if conflicted_paths:
+            if conflict_skip_paths:
                 raise DaCliError(
                     "no files could be archived from the package directory "
-                    "(every file was skipped because of Playground name conflicts)"
+                    "(every file was skipped because of Playground name conflicts or could not be read)"
                 )
             raise DaCliError("no files could be archived from the package directory")
         archived_files.sort()
