@@ -710,8 +710,9 @@ def _readable_paths(paths: list[str]) -> list[str]:
 
     A file that can not be read can never reach the server, so it must not
     count as a Playground conflict participant: it would only keep its
-    readable same-named sibling from syncing. Matches the readability filter
-    the package installer applies to its conflict candidates.
+    readable same-named sibling from syncing. The package installer filters
+    its conflict candidates through this too, so both sync paths agree on
+    what counts as a conflict.
     """
     return [path for path in paths if os.access(path, os.R_OK)]
 
@@ -1687,16 +1688,14 @@ def package_installer(
                     this_package_name, dependencies = load_package_metadata(root, files)
             conflict_skip_paths: set[str] = set()
             if playground:
-                candidates = [
-                    os.path.join(root, the_file)
-                    for root, adjusted_root, files in walked_dirs
-                    for the_file in files
-                    if not _is_excluded(the_file, root, adjusted_root, root_directory, to_ignore)
-                    # A file that can not be read never reaches the server, so
-                    # it must not count as a conflict participant: it would
-                    # only keep its readable same-named sibling from syncing.
-                    and os.access(os.path.join(root, the_file), os.R_OK)
-                ]
+                candidates = _readable_paths(
+                    [
+                        os.path.join(root, the_file)
+                        for root, adjusted_root, files in walked_dirs
+                        for the_file in files
+                        if not _is_excluded(the_file, root, adjusted_root, root_directory, to_ignore)
+                    ]
+                )
                 if playground_name_conflicts(candidates):
                     # Read each conflicted candidate once to see which of them
                     # would actually be archived; only those count as
