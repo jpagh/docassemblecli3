@@ -1159,6 +1159,23 @@ def test_scan_directory_matches_ignore_patterns_and_watch_handler(tmp_path, monk
     assert mod.LAST_MODIFIED == {"time": 123, "files": {event.src_path: {"deleted": True}}, "restart": True}
 
 
+def test_watch_handler_invalidates_ignore_cache_on_gitignore_event(tmp_path, monkeypatch):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    gitignore = package_dir / "nested" / ".gitignore"
+    gitignore.parent.mkdir()
+    gitignore.write_text("x\n", encoding="utf-8")
+
+    handler = mod.WatchHandler(directory=str(package_dir))
+    monkeypatch.setattr(mod, "matches_ignore_patterns", lambda **kwargs: False)
+    # a sentinel proves the handler dropped the compiled matcher; a nested
+    # .gitignore change must invalidate the cache even though only the root
+    # .gitignore's mtime is part of the cache key
+    mod.GITMATCH_COMPILED = "compiled"
+    handler.on_any_event(SimpleNamespace(is_directory=False, event_type="modified", src_path=str(gitignore)))
+    assert mod.GITMATCH_COMPILED is None
+
+
 def test_nested_gitignore_patterns_are_honored(tmp_path):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()

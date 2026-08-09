@@ -2415,6 +2415,17 @@ def matches_ignore_patterns(path: str, directory: str) -> bool:
     return GITMATCH_COMPILED.match(path=path)
 
 
+def invalidate_ignore_cache() -> None:
+    """Drop the compiled ignore matcher; the next match recompiles it.
+
+    Needed when a nested .gitignore changes: only the root .gitignore's mtime
+    is part of the cache key in matches_ignore_patterns, so a nested one would
+    otherwise never invalidate the compiled patterns.
+    """
+    global GITMATCH_COMPILED
+    GITMATCH_COMPILED = None
+
+
 class WatchHandler(FileSystemEventHandler):
     def __init__(self, *args, **kwargs):
         self.directory = kwargs.pop("directory")
@@ -2430,8 +2441,7 @@ class WatchHandler(FileSystemEventHandler):
         if os.path.basename(event_path) == ".gitignore":
             # Nested .gitignore files are collected when the ignore matcher
             # is compiled, so any change to one must invalidate the cache.
-            global GITMATCH_COMPILED
-            GITMATCH_COMPILED = None
+            invalidate_ignore_cache()
         if matches_ignore_patterns(path=event_path.replace("\\", "/"), directory=self.directory):
             return
         if event_type not in ("created", "modified", "deleted"):
