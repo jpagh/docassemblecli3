@@ -795,8 +795,11 @@ def playground_delete_server_file(
 ) -> None:
     """Delete a file from the Playground.
 
-    Deleting a nonexistent file succeeds (the endpoint is idempotent). Raises
-    DaCliError on failure; on success the name is removed from UPLOADED_NAMES.
+    Deleting a nonexistent file succeeds (the endpoint is idempotent); a 404
+    is treated as success too, because some servers (or proxies in front of
+    them) report a missing file that way, and the file is already gone, which
+    is the state a delete is meant to produce. Raises DaCliError on failure;
+    on success the name is removed from UPLOADED_NAMES.
     """
     params = {"folder": folder, "filename": filename, "restart": "1" if folder == "modules" else "0"}
     if project:
@@ -813,6 +816,13 @@ def playground_delete_server_file(
         if not isinstance(info, dict) or info.get("task_id") is None:
             raise DaCliError("server response missing task_id: " + str(info))
         wait_for_server(True, info["task_id"], apikey, apiurl)
+    elif response.status_code == 404:
+        # The documented endpoint returns a success code even for a missing
+        # file, but some servers (or proxies in front of them) answer 404.
+        # The file is already gone, so treat it as a successful delete rather
+        # than retrying forever (the local file no longer exists, so a retry
+        # could never clear the failure).
+        pass
     elif response.status_code != 204:
         raise DaCliError(f"playground delete ({folder}) returned {response.status_code}: {response.text}")
     UPLOADED_NAMES.setdefault((folder, project or "default"), set()).discard(filename)
@@ -1533,17 +1543,13 @@ def task_id_from_response(response, endpoint: str) -> str:
     return task_id
 
 
-def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
-    """Write one file into the zip, hashing its content.
+def _stable_checksum(full_path: str) -> str | None:
+    """Return the checksum of a file read to stable content, or None.
 
     The file is stat'ed before and after a hashing read; if it changed in
-    between it is re-read (up to three attempts). Only after the content is
-    confirmed stable is it written to the zip, and the write is verified to
-    produce the same checksum, so the archive never contains a torn snapshot
-    of a file that was being edited. Returns the checksum of exactly what
-    was archived, or None if the file could not be read.
+    between it is re-read (up to three attempts), so the checksum describes
+    content that was not being edited.
     """
-    arcname = os.path.relpath(full_path, os.path.join(directory, ".."))
     for _attempt in range(3):
         try:
             st = os.stat(full_path)
@@ -1564,21 +1570,36 @@ def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
             continue
         if (st.st_mtime, st.st_size) != (st_after.st_mtime, st_after.st_size):
             continue
-        verified_hash = hasher.hexdigest()
-        write_hasher = xxhash.xxh64()
-        try:
-            with open(full_path, "rb") as fp, zf.open(arcname, "w", force_zip64=True) as dest:
-                while chunk := fp.read(CHUNK_SIZE):
-                    write_hasher.update(chunk)
-                    dest.write(chunk)
-        except OSError as err:
-            click.secho(f"{err} while archiving {full_path}.", fg="red")
-            return None
-        if write_hasher.hexdigest() == verified_hash:
-            return verified_hash
-        click.secho(f"{full_path} changed while it was being archived; skipping it.", fg="red")
-        return None
+        return hasher.hexdigest()
     click.secho(f"{full_path} kept changing while it was being archived; skipping it.", fg="red")
+    return None
+
+
+def _archive_one_file(zf, full_path: str, directory: str) -> str | None:
+    """Write one file into the zip, hashing its content.
+
+    The file is first read to stable content; only then is it written to the
+    zip, and the write is verified to produce the same checksum, so the
+    archive never contains a torn snapshot of a file that was being edited.
+    Returns the checksum of exactly what was archived, or None if the file
+    could not be read.
+    """
+    arcname = os.path.relpath(full_path, os.path.join(directory, ".."))
+    verified_hash = _stable_checksum(full_path)
+    if verified_hash is None:
+        return None
+    write_hasher = xxhash.xxh64()
+    try:
+        with open(full_path, "rb") as fp, zf.open(arcname, "w", force_zip64=True) as dest:
+            while chunk := fp.read(CHUNK_SIZE):
+                write_hasher.update(chunk)
+                dest.write(chunk)
+    except OSError as err:
+        click.secho(f"{err} while archiving {full_path}.", fg="red")
+        return None
+    if write_hasher.hexdigest() == verified_hash:
+        return verified_hash
+    click.secho(f"{full_path} changed while it was being archived; skipping it.", fg="red")
     return None
 
 
@@ -1644,17 +1665,36 @@ def package_installer(
                         and root_directory == root
                         or os.path.normpath(os.path.join(adjusted_root, the_file)) in to_ignore
                     )
+                    # A file that can not be read never reaches the server, so
+                    # it must not count as a conflict participant: it would
+                    # only keep its readable same-named sibling from syncing.
+                    and os.access(os.path.join(root, the_file), os.R_OK)
                 ]
-                conflicts = playground_name_conflicts(candidates)
-                if conflicts:
+                if playground_name_conflicts(candidates):
+                    # Read each conflicted candidate once to see which of them
+                    # would actually be archived; only those count as
+                    # conflicting. A candidate that can not be read (or keeps
+                    # changing) is skipped and reported, and its readable
+                    # same-named sibling is released to sync normally.
                     conflicted_paths = playground_conflict_paths(candidates)
+                    would_archive: set[str] = set()
+                    for full_path in sorted(conflicted_paths):
+                        if _stable_checksum(full_path) is not None:
+                            would_archive.add(full_path)
+                        else:
+                            skipped_files.append(full_path)
+                    still_conflicted = playground_conflict_paths(list(would_archive))
                     unannounced = [
                         pair
-                        for pair in conflicts
+                        for pair in playground_name_conflicts(list(still_conflicted))
                         if not announced_conflicts or not set(pair[:2]).issubset(announced_conflicts)
                     ]
                     if unannounced:
                         click.secho(format_playground_conflict_skip(unannounced), fg="yellow")
+                    # The main loop skips the files that are still conflicted
+                    # plus the ones that failed the readiness pass (already
+                    # reported); released files archive normally.
+                    conflicted_paths = still_conflicted | (conflicted_paths - would_archive)
             for root, adjusted_root, files in frames:
                 for the_file in files:
                     if (
@@ -2255,6 +2295,14 @@ def _translate_nested_gitignore_pattern(pattern: str, relative_directory: str) -
     return prefix + translated + ("/" if dir_only else "")
 
 
+def _gitignored_directory(matcher, parent_directory: str, subdirectory: str, directory: str) -> bool:
+    """Return True if git would not descend from `parent_directory` into
+    `subdirectory` because the patterns compiled into `matcher` (the root
+    .gitignore and the ancestors' nested ones) exclude the directory."""
+    relative = os.path.relpath(os.path.join(parent_directory, subdirectory), directory).replace(os.sep, "/")
+    return bool(matcher.match(relative, is_dir=True))
+
+
 def nested_gitignore_patterns(directory: str) -> list[str]:
     """Collect patterns from .gitignore files below `directory` (excluding the
     root one), translated to be relative to `directory`.
@@ -2264,21 +2312,35 @@ def nested_gitignore_patterns(directory: str) -> list[str]:
     files. A file the watcher tracks but the archive can never include stays
     dirty forever and keeps triggering full installs until the archive-skip
     suspension kicks in.
+
+    Directories the root or an ancestor .gitignore excludes are not descended
+    into, mirroring git, which never reads the .gitignore files inside an
+    excluded directory: a negation there must not un-ignore anything, because
+    the archive can never include files from an excluded directory.
     """
-    patterns: list[str] = []
     root_gitignore = os.path.abspath(os.path.join(directory, ".gitignore"))
+    if os.path.exists(root_gitignore):
+        root_patterns = read_ignore_file(root_gitignore)
+    else:
+        root_patterns = []
+    patterns: list[str] = []
+    matcher = gitmatch.compile(root_patterns)
     for current_directory, subdirectories, files in os.walk(directory):
-        subdirectories[:] = [d for d in subdirectories if d not in EXCLUDED_DIRECTORIES]
-        if ".gitignore" not in files:
-            continue
         gitignore_path = os.path.abspath(os.path.join(current_directory, ".gitignore"))
-        if gitignore_path == root_gitignore:
-            continue
-        relative_directory = os.path.relpath(current_directory, directory).replace(os.sep, "/")
-        patterns.extend(
-            _translate_nested_gitignore_pattern(pattern, relative_directory)
-            for pattern in read_ignore_file(gitignore_path)
-        )
+        if gitignore_path != root_gitignore and ".gitignore" in files:
+            relative_directory = os.path.relpath(current_directory, directory).replace(os.sep, "/")
+            translated = [
+                _translate_nested_gitignore_pattern(pattern, relative_directory)
+                for pattern in read_ignore_file(gitignore_path)
+            ]
+            patterns.extend(translated)
+            if translated:
+                matcher = gitmatch.compile(root_patterns + patterns)
+        subdirectories[:] = [
+            d
+            for d in subdirectories
+            if d not in EXCLUDED_DIRECTORIES and not _gitignored_directory(matcher, current_directory, d, directory)
+        ]
     return patterns
 
 

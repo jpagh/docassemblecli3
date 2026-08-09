@@ -356,8 +356,10 @@ works:
     -h, --help                   Show this message and exit.
 
 Your package's `.gitignore` file is also used by `watch` to decide which files
-to ignore. If you don't have a `.gitignore` file in your package, then the
-default `.gitignore` that `create` makes is used instead. You can also add a
+to ignore, and `.gitignore` files in subdirectories are honored too (a deeper
+file overrides a shallower one, exactly as git does). If you don't have a
+`.gitignore` file in your package, then the default `.gitignore` that `create`
+makes is used instead. You can also add a
 `.dawatchignore` file in the package root for watch-only ignore rules
 that you do not want to place in `.gitignore`; it uses the same gitignore-style
 patterns. For example, putting `tests/` in `.dawatchignore` will stop

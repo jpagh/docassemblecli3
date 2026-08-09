@@ -1213,6 +1213,30 @@ def test_nested_gitignore_patterns_are_honored(tmp_path):
     assert str(sub_dir / "a.log") not in mod.WATCHED_FILES
 
 
+def test_nested_gitignore_inside_ignored_directory_is_not_read(tmp_path):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    (package_dir / ".gitignore").write_text("sub/\n", encoding="utf-8")
+    sub_dir = package_dir / "sub"
+    sub_dir.mkdir()
+    # git never descends into an excluded directory, so it never reads this
+    # file: the negation must not un-ignore anything, because the archive can
+    # never include files from sub/
+    (sub_dir / ".gitignore").write_text("!keep.txt\n", encoding="utf-8")
+    (sub_dir / "keep.txt").write_text("x", encoding="utf-8")
+    (sub_dir / "drop.txt").write_text("x", encoding="utf-8")
+
+    mod.GITMATCH_COMPILED = None
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "keep.txt"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(sub_dir / "drop.txt"), str(package_dir))) is True
+
+    # and scan_directory must not track them either
+    mod.GITMATCH_COMPILED = None
+    mod.scan_directory(str(package_dir))
+    assert str(sub_dir / "keep.txt") not in mod.WATCHED_FILES
+    assert str(sub_dir / "drop.txt") not in mod.WATCHED_FILES
+
+
 def test_watch_command(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
@@ -4546,6 +4570,22 @@ def test_playground_delete_files_success_and_failure(tmp_path, monkeypatch, caps
     assert "playground delete (modules) returned 500" in capsys.readouterr().out
 
 
+def test_playground_delete_server_file_treats_404_as_success(tmp_path, monkeypatch):
+    file_path = tmp_path / "docassemble" / "test" / "data" / "questions" / "gone.yml"
+    file_path.parent.mkdir(parents=True)
+    file_path.write_text("---\n", encoding="utf-8")
+    mod.UPLOADED_NAMES[("questions", "demo")] = {"gone.yml"}
+
+    # some servers (or proxies) report a missing file with 404 instead of the
+    # documented success code; the file is already gone, so the delete is done
+    monkeypatch.setattr(
+        mod, "http_delete", lambda url, params=None, **kwargs: DummyResponse(status_code=404, text="not found")
+    )
+    failed = mod.playground_delete_files("https://example.com", "key", "demo", [str(file_path)])
+    assert failed == []
+    assert mod.UPLOADED_NAMES[("questions", "demo")] == set()
+
+
 def test_playground_reconcile_deletes_only_cli_owned_orphans(tmp_path, monkeypatch, capsys):
     kept = tmp_path / "docassemble" / "test" / "data" / "questions" / "kept.yml"
     kept.parent.mkdir(parents=True)
@@ -4844,6 +4884,106 @@ def test_package_installer_playground_name_conflict_announced_once(tmp_path, mon
     )
     assert isinstance(result, dict) and result
     assert "Playground name conflict" not in capsys.readouterr().out
+
+
+def test_package_installer_unreadable_twin_does_not_block_sibling(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {
+            "docassemble/test/data/questions/a/same.yml": "---\n",
+            "docassemble/test/data/questions/b/same.yml": "---\n",
+        },
+    )
+    unreadable = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    if os.geteuid() == 0:
+        pytest.skip("unreadable files are still readable as root")
+    os.chmod(unreadable, 0)
+    try:
+        assert os.access(unreadable, os.R_OK) is False
+
+        class Result:
+            stdout = ""
+            stderr = ""
+
+            def check_returncode(self):
+                return None
+
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+        monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
+
+        def fake_post(url, **kwargs):
+            if url.endswith(("/api/playground/project", "/api/clear_cache")):
+                return DummyResponse(status_code=204)
+            return DummyResponse(status_code=200, json_data={"task_id": "task"})
+
+        monkeypatch.setattr(mod.requests, "post", fake_post)
+        monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: None)
+
+        result = mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="no")
+        # the unreadable file can never reach the server, so it is not a real
+        # conflict: its readable same-named sibling is archived
+        assert any("same.yml" in key for key in result)
+        out = capsys.readouterr().out
+        # no conflict warning, because there is no archivable conflict
+        assert "Playground name conflict" not in out
+        assert "Files that could not be read were skipped" in out
+        assert str(unreadable) in out
+    finally:
+        os.chmod(unreadable, 0o644)
+
+
+def test_package_installer_releases_sibling_when_twin_fails_archiving(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    make_package(
+        package_dir,
+        'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
+        {
+            "docassemble/test/data/questions/a/same.yml": "---\n",
+            "docassemble/test/data/questions/b/same.yml": "---\n",
+        },
+    )
+    unreadable = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+
+    real_stable_checksum = mod._stable_checksum
+
+    def fake_stable_checksum(full_path):
+        # the twin passes the readability probe but fails when it is read
+        # (e.g. it keeps changing while being read)
+        if full_path == str(unreadable):
+            return None
+        return real_stable_checksum(full_path)
+
+    monkeypatch.setattr(mod, "_stable_checksum", fake_stable_checksum)
+
+    class Result:
+        stdout = ""
+        stderr = ""
+
+        def check_returncode(self):
+            return None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
+
+    def fake_post(url, **kwargs):
+        if url.endswith(("/api/playground/project", "/api/clear_cache")):
+            return DummyResponse(status_code=204)
+        return DummyResponse(status_code=200, json_data={"task_id": "task"})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: None)
+
+    result = mod.package_installer(str(package_dir), "https://example.com", "key", playground="demo", restart="no")
+    assert isinstance(result, dict) and result
+    # the sibling is released once its twin turns out not to be archivable
+    assert any("same.yml" in key for key in result)
+    out = capsys.readouterr().out
+    # no conflict warning: there is no archivable conflict
+    assert "Playground name conflict" not in out
+    assert "Files that could not be read were skipped" in out
+    assert str(unreadable) in out
 
 
 def test_package_installer_non_playground_allows_same_basename(tmp_path, monkeypatch):
