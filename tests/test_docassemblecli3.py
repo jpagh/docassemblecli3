@@ -42,6 +42,44 @@ class DummyResponse:
         return item in self._contains
 
 
+class FakeObserver:
+    """Minimal watchdog Observer double.
+
+    Records lifecycle calls in `calls` and tracks stop/join state so tests
+    can assert the watcher shuts down cleanly.
+    """
+
+    def __init__(self):
+        self.stopped = False
+        self.joined = False
+        self.calls = []
+
+    def schedule(self, *args, **kwargs):
+        self.calls.append("schedule")
+
+    def start(self):
+        self.calls.append("start")
+
+    def stop(self):
+        self.calls.append("stop")
+        self.stopped = True
+
+    def join(self):
+        self.calls.append("join")
+        self.joined = True
+
+
+class Result:
+    """subprocess.run double for the installer's `git ls-files` call."""
+
+    def __init__(self, stdout="", stderr=""):
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def check_returncode(self):
+        return None
+
+
 @pytest.fixture(autouse=True)
 def reset_globals(monkeypatch):
     monkeypatch.setattr(mod, "BELL", "\a")
@@ -801,13 +839,6 @@ def test_package_installer_reads_pyproject_metadata(tmp_path, monkeypatch):
         "---\n", encoding="utf-8"
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(
         mod.requests,
@@ -837,14 +868,8 @@ def test_package_installer_restart_no_and_dependency_checks(tmp_path, monkeypatc
         {"docassemble/test/data/questions/interview.yml": "---\n"},
     )
 
-    class Result:
-        stdout = "ignored.txt\n"
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
-    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
+    # git ls-files reports ignored.txt as ignored; the archive must exclude it
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result("ignored.txt\n"))
 
     get_calls = []
 
@@ -904,13 +929,6 @@ def test_package_installer_playground_and_restart_paths(tmp_path, monkeypatch):
             "docassemble/test/data/questions/interview.yml": "---\n",
         },
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
@@ -980,13 +998,6 @@ def test_package_installer_dry_run_has_no_writes(tmp_path, monkeypatch, capsys):
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/module.py": "value = 1\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     post_calls = []
     wait_calls = []
@@ -1287,23 +1298,6 @@ def test_watch_command(tmp_path, monkeypatch):
     (package_dir / "file.yml").write_text("content", encoding="utf-8")
     installs = []
 
-    class FakeObserver:
-        def __init__(self):
-            self.stopped = False
-            self.joined = False
-
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            self.stopped = True
-
-        def join(self):
-            self.joined = True
-
     observer = FakeObserver()
     monkeypatch.setattr(mod, "Observer", lambda: observer)
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -1372,19 +1366,6 @@ def test_install_and_watch_use_project_config_defaults(tmp_path, monkeypatch):
     )
     assert install_calls[0]["playground"] == "install-playground"
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
@@ -1431,19 +1412,6 @@ def test_install_and_watch_no_playground_override(tmp_path, monkeypatch):
         == 0
     )
     assert install_calls[0]["playground"] == ""
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -2519,19 +2487,6 @@ def test_watch_command_empty_batch_and_incremental_path(tmp_path, monkeypatch):
     file_path.parent.mkdir(parents=True)
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -2588,19 +2543,6 @@ def test_watch_incremental_upload_announces_installed(tmp_path, monkeypatch, cap
     file_path.parent.mkdir(parents=True)
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -2656,19 +2598,6 @@ def test_watch_dry_run_uses_incremental_playground_preview(tmp_path, monkeypatch
     file_path.parent.mkdir(parents=True)
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -2711,19 +2640,6 @@ def test_watch_startup_install_message_non_dry_run(tmp_path, monkeypatch, capsys
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -2756,19 +2672,6 @@ def test_watch_startup_install_message_non_dry_run(tmp_path, monkeypatch, capsys
 def test_watch_startup_install_message_dry_run(tmp_path, monkeypatch, capsys):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -2803,22 +2706,8 @@ def test_watch_startup_click_exception_stops_observer_and_continues(tmp_path, mo
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
 
-    observer_calls = []
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            observer_calls.append("start")
-
-        def stop(self):
-            observer_calls.append("stop")
-
-        def join(self):
-            observer_calls.append("join")
-
-    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    observer = FakeObserver()
+    monkeypatch.setattr(mod, "Observer", lambda: observer)
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
@@ -2848,7 +2737,7 @@ def test_watch_startup_click_exception_stops_observer_and_continues(tmp_path, mo
     assert mod.watch.callback(
         str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
     ) == ('\nStopping "docassemblecli3 watch".')
-    assert observer_calls == ["start", "stop", "join"]
+    assert observer.calls == ["schedule", "start", "stop", "join"]
     assert "startup install failed" in capsys.readouterr().out
 
 
@@ -2856,22 +2745,8 @@ def test_watch_request_exception_stops_observer_and_continues(tmp_path, monkeypa
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
 
-    observer_calls = []
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            observer_calls.append("start")
-
-        def stop(self):
-            observer_calls.append("stop")
-
-        def join(self):
-            observer_calls.append("join")
-
-    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    observer = FakeObserver()
+    monkeypatch.setattr(mod, "Observer", lambda: observer)
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
@@ -2901,7 +2776,7 @@ def test_watch_request_exception_stops_observer_and_continues(tmp_path, monkeypa
     assert mod.watch.callback(
         str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
     ) == ('\nStopping "docassemblecli3 watch".')
-    assert observer_calls == ["start", "stop", "join"]
+    assert observer.calls == ["schedule", "start", "stop", "join"]
     assert "network down" in capsys.readouterr().out
 
 
@@ -2910,19 +2785,6 @@ def test_watch_dry_run_marks_previewed_and_dedups(tmp_path, monkeypatch):
     package_dir.mkdir()
     file_path = package_dir / "file.yml"
     file_path.write_text("content", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -2969,19 +2831,6 @@ def test_watch_upload_failure_backs_off_and_keeps_watching(tmp_path, monkeypatch
     file_path.parent.mkdir(parents=True)
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -3018,19 +2867,6 @@ def test_watch_command_falls_back_to_package_installer(tmp_path, monkeypatch):
     package_dir.mkdir()
     (package_dir / "file.yml").write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -3065,19 +2901,6 @@ def test_watch_marks_uploaded_only_after_successful_install(tmp_path, monkeypatc
     package_dir.mkdir()
     file_path = package_dir / "file.yml"
     file_path.write_text("content", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -3132,19 +2955,6 @@ def test_watch_retries_failed_install_without_wiping_other_files(tmp_path, monke
     other_path = package_dir / "other.yml"
     other_path.write_text("other", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -3198,19 +3008,6 @@ def test_watch_continues_after_da_cli_error(tmp_path, monkeypatch, capsys):
     file_path = package_dir / "file.yml"
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -3263,22 +3060,8 @@ def test_watch_continues_after_unexpected_exception(tmp_path, monkeypatch, capsy
     file_path = package_dir / "file.yml"
     file_path.write_text("content", encoding="utf-8")
 
-    observer_calls = []
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            observer_calls.append("start")
-
-        def stop(self):
-            observer_calls.append("stop")
-
-        def join(self):
-            observer_calls.append("join")
-
-    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    observer = FakeObserver()
+    monkeypatch.setattr(mod, "Observer", lambda: observer)
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
@@ -3322,7 +3105,7 @@ def test_watch_continues_after_unexpected_exception(tmp_path, monkeypatch, capsy
     assert len(calls) == 2
     assert "unexpected boom" in capsys.readouterr().out
     assert mod.WATCHED_FILES[str(file_path)].uploaded_hash == "hash"
-    assert observer_calls == ["start", "stop", "join"]
+    assert observer.calls == ["schedule", "start", "stop", "join"]
 
 
 def test_calculate_checksum_missing_file_is_quiet(capsys, tmp_path):
@@ -3418,13 +3201,6 @@ def test_package_installer_dependency_parsing_and_debug(tmp_path, monkeypatch):
             return real_search(pattern, text, flags=flags)
         return real_search(pattern, text, flags=flags)
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.re, "search", fake_search)
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(mod, "DEBUG", True)
@@ -3460,13 +3236,6 @@ def test_package_installer_nonplayground_error_paths(tmp_path, monkeypatch):
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/data/questions/interview.yml": "---\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
@@ -3551,13 +3320,6 @@ def test_package_installer_playground_error_paths(tmp_path, monkeypatch):
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/module.py": "value = 1\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(mod, "wait_for_server", lambda **kwargs: None)
@@ -3680,13 +3442,6 @@ def test_package_installer_playground_requests_have_timeouts_and_progress(tmp_pa
         {"docassemble/test/module.py": "value = 1\n"},
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
     requests_seen = []
@@ -3731,13 +3486,6 @@ def test_package_installer_skips_project_create_for_existing_playground(tmp_path
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/module.py": "value = 1\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
@@ -3808,19 +3556,6 @@ def test_http_get_uses_fresh_niquests_session(monkeypatch):
 def test_watch_package_location_and_exception(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -3943,13 +3678,6 @@ def test_package_installer_setup_cfg_only_and_nonmatching_dependencies(tmp_path,
     data_file.parent.mkdir(parents=True)
     data_file.write_text("---\n", encoding="utf-8")
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
     def post_package(url, data=None, files=None, headers=None, timeout=None):
@@ -4023,13 +3751,6 @@ def test_package_installer_additional_restart_branches(tmp_path, monkeypatch):
         {"docassemble/test/module.py": "value = 1\n"},
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
     monkeypatch.setattr(
@@ -4072,13 +3793,6 @@ def test_package_installer_wait_for_server_error_strings(tmp_path, monkeypatch, 
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/module.py": "value = 1\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(
@@ -4135,13 +3849,6 @@ def test_package_installer_failed_install_not_hidden_by_failed_cache_clear(tmp_p
         {"docassemble/test/data/questions/interview.yml": "---\n"},
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(
         mod.requests,
@@ -4176,13 +3883,6 @@ def test_package_installer_invalid_json_and_missing_task_id(tmp_path, monkeypatc
         'from setuptools import setup\nsetup(name="docassemble.test", install_requires=[])\n',
         {"docassemble/test/module.py": "value = 1\n"},
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(
@@ -4225,13 +3925,6 @@ def test_package_installer_playground_non_object_json(tmp_path, monkeypatch, cap
         {"docassemble/test/module.py": "value = 1\n"},
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(
         mod.requests,
@@ -4259,13 +3952,6 @@ def test_package_installer_ignores_tests_directory_for_restart(tmp_path, monkeyp
             "docassemble/test/data/questions/interview.yml": "---\n",
         },
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     posts = []
 
@@ -4331,19 +4017,6 @@ def test_watch_with_explicit_playground(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -4368,19 +4041,6 @@ def test_watch_loop_snapshots_events_to_avoid_race(tmp_path, monkeypatch):
     package_dir.mkdir()
     (package_dir / "first.yml").write_text("---\n", encoding="utf-8")
     (package_dir / "second.yml").write_text("---\n", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -4521,13 +4181,6 @@ def test_package_installer_final_dependency_branches(tmp_path, monkeypatch):
         {"docassemble/test/module.py": "value = 1\n"},
     )
     real_search = mod.re.search
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     class FakeGroupText:
         def split(self, _separator):
@@ -4802,19 +4455,6 @@ def test_watch_retry_only_cycle_without_events(tmp_path, monkeypatch):
     file_path = package_dir / "file.yml"
     file_path.write_text("content", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -4861,13 +4501,6 @@ def test_package_installer_playground_name_conflict_skips_files(tmp_path, monkey
         },
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
 
@@ -4899,13 +4532,6 @@ def test_package_installer_playground_name_conflict_announced_once(tmp_path, mon
             "docassemble/test/data/questions/b/same.yml": "---\n",
         },
     )
-
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
@@ -4948,13 +4574,6 @@ def test_package_installer_unreadable_twin_does_not_block_sibling(tmp_path, monk
     os.chmod(unreadable, 0)
     try:
         assert os.access(unreadable, os.R_OK) is False
-
-        class Result:
-            stdout = ""
-            stderr = ""
-
-            def check_returncode(self):
-                return None
 
         monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
         monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
@@ -5003,13 +4622,6 @@ def test_package_installer_releases_sibling_when_twin_fails_archiving(tmp_path, 
 
     monkeypatch.setattr(mod, "_stable_checksum", fake_stable_checksum)
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
     monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: DummyResponse(status_code=200, json_data=[]))
 
@@ -5043,13 +4655,6 @@ def test_package_installer_non_playground_allows_same_basename(tmp_path, monkeyp
         },
     )
 
-    class Result:
-        stdout = ""
-        stderr = ""
-
-        def check_returncode(self):
-            return None
-
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: Result())
 
     def fake_post(url, **kwargs):
@@ -5073,22 +4678,8 @@ def test_watch_playground_startup_conflict_warns_and_continues(tmp_path, monkeyp
     b.parent.mkdir(parents=True, exist_ok=True)
     b.write_text("---\n", encoding="utf-8")
 
-    observer_calls = []
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            observer_calls.append("start")
-
-        def stop(self):
-            observer_calls.append("stop")
-
-        def join(self):
-            observer_calls.append("join")
-
-    monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+    observer = FakeObserver()
+    monkeypatch.setattr(mod, "Observer", lambda: observer)
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
         mod,
@@ -5114,7 +4705,7 @@ def test_watch_playground_startup_conflict_warns_and_continues(tmp_path, monkeyp
     out = capsys.readouterr().out
     assert "Playground name conflict" in out
     assert "will not be synced to the Playground" in out
-    assert observer_calls == ["start", "stop", "join"]
+    assert observer.calls == ["schedule", "start", "stop", "join"]
 
 
 def test_watch_playground_mid_session_conflict_skips_with_warning(tmp_path, monkeypatch, capsys):
@@ -5126,19 +4717,6 @@ def test_watch_playground_mid_session_conflict_skips_with_warning(tmp_path, monk
     b = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
     b.parent.mkdir(parents=True, exist_ok=True)
     b.write_text("---\n", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -5187,19 +4765,6 @@ def test_watch_backoffs_unconfirmed_files_after_successful_install(tmp_path, mon
     file_b = package_dir / "b.yml"
     file_b.write_text("content-b", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -5242,19 +4807,6 @@ def test_watch_suspends_file_after_repeated_skips(tmp_path, monkeypatch, capsys)
     package_dir.mkdir()
     file_path = package_dir / "a.yml"
     file_path.write_text("content", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -5324,19 +4876,6 @@ def test_watch_playground_conflicted_sibling_deleted_survivor_uploads(tmp_path, 
     b.parent.mkdir(parents=True, exist_ok=True)
     b.write_text("---\n", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -5402,19 +4941,6 @@ def test_watch_playground_unreadable_twin_does_not_block_sibling(tmp_path, monke
     try:
         assert os.access(a, os.R_OK) is False
 
-        class FakeObserver:
-            def schedule(self, *args, **kwargs):
-                return None
-
-            def start(self):
-                return None
-
-            def stop(self):
-                return None
-
-            def join(self):
-                return None
-
         monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
         monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
         monkeypatch.setattr(
@@ -5468,19 +4994,6 @@ def test_watch_playground_pending_delete_defers_same_name_upload(tmp_path, monke
     other.parent.mkdir(parents=True, exist_ok=True)
     other.write_text("---\n", encoding="utf-8")
 
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
-
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
     monkeypatch.setattr(
@@ -5532,19 +5045,6 @@ def test_watch_playground_conflict_warns_once_and_uploads_others(tmp_path, monke
     b.write_text("---\n", encoding="utf-8")
     c = package_dir / "docassemble" / "test" / "data" / "questions" / "other.yml"
     c.write_text("---\n", encoding="utf-8")
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
@@ -5638,19 +5138,6 @@ def test_resolve_sweep_interval_default_config_and_cli(capsys):
 def test_watch_uses_resolved_sweep_interval(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
-
-    class FakeObserver:
-        def schedule(self, *args, **kwargs):
-            return None
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-        def join(self):
-            return None
 
     monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
     monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
