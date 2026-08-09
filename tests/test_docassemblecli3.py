@@ -5363,6 +5363,82 @@ def test_watch_playground_conflicted_sibling_deleted_survivor_uploads(tmp_path, 
     assert uploads == [[str(a)]]
 
 
+def test_watch_playground_unreadable_twin_does_not_block_sibling(tmp_path, monkeypatch, capsys):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    a = package_dir / "docassemble" / "test" / "data" / "questions" / "a" / "same.yml"
+    a.parent.mkdir(parents=True)
+    a.write_text("---\n", encoding="utf-8")
+    b = package_dir / "docassemble" / "test" / "data" / "questions" / "b" / "same.yml"
+    b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text("---\n", encoding="utf-8")
+
+    # `a` was already tracked and uploaded, then became unreadable mid-session
+    # (the content-based sync can no longer read it, so it can never reach the
+    # server again). It must not count as a conflict participant: its readable
+    # same-named sibling `b` must sync normally.
+    if os.geteuid() == 0:
+        pytest.skip("unreadable files are still readable as root")
+    os.chmod(a, 0)
+    try:
+        assert os.access(a, os.R_OK) is False
+
+        class FakeObserver:
+            def schedule(self, *args, **kwargs):
+                return None
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return None
+
+            def join(self):
+                return None
+
+        monkeypatch.setattr(mod, "Observer", lambda: FakeObserver())
+        monkeypatch.setattr(mod, "scan_directory", lambda directory: None)
+        monkeypatch.setattr(
+            mod,
+            "resolve_command_server",
+            lambda *args, **kwargs: {
+                "name": "example.com",
+                "apiurl": "https://example.com",
+                "apikey": "key",
+                "directory": str(package_dir),
+                "playground": "stored-playground",
+            },
+        )
+        monkeypatch.setattr(mod, "WATCH_SETTLE_DELAY", 0)
+        monkeypatch.setattr(mod, "sweep_directory", lambda directory: ([], []))
+        monkeypatch.setattr(mod, "playground_reconcile", lambda **kwargs: None)
+        monkeypatch.setattr(mod, "calculate_checksum", lambda path: "hash")
+
+        mod.WATCHED_FILES[str(a)] = mod.WatchState("hash", "hash")
+        mod.WATCHED_FILES[str(b)] = mod.WatchState("old", "old")
+
+        uploads = []
+        monkeypatch.setattr(
+            mod, "playground_upload_batch", lambda **kwargs: uploads.append(kwargs["dirty_paths"]) or ({}, [])
+        )
+        monkeypatch.setattr(mod, "playground_delete_files", lambda **kwargs: [])
+
+        # b is modified: a is unreadable, so the conflict set is empty and b
+        # uploads instead of being skipped
+        mod.LAST_MODIFIED = {"time": 1, "files": {str(b): {"modified": True}}, "restart": False}
+        monkeypatch.setattr(mod.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt("stop")))
+
+        result = mod.watch.callback(
+            str(package_dir), ("cfg", []), False, (None, None), "", None, False, "no", 0, False, False
+        )
+        assert result == '\nStopping "docassemblecli3 watch".'
+        assert uploads == [[str(b)]]
+        out = capsys.readouterr().out
+        assert "Playground name conflict" not in out
+    finally:
+        os.chmod(a, 0o644)
+
+
 def test_watch_playground_pending_delete_defers_same_name_upload(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()

@@ -705,6 +705,17 @@ def playground_conflict_paths(paths: list[str]) -> set[str]:
     return {path for pair in playground_name_conflicts(paths) for path in pair[:2]}
 
 
+def _readable_paths(paths: list[str]) -> list[str]:
+    """Return the paths that are currently readable.
+
+    A file that can not be read can never reach the server, so it must not
+    count as a Playground conflict participant: it would only keep its
+    readable same-named sibling from syncing. Matches the readability filter
+    the package installer applies to its conflict candidates.
+    """
+    return [path for path in paths if os.access(path, os.R_OK)]
+
+
 def format_playground_conflict_skip(conflicts: list[tuple[str, str, str]]) -> str:
     lines = [
         "Playground name conflict: the Playground stores files flat by name, so the following files would overwrite each other on the server. They will not be synced to the Playground (package installs still include them):"
@@ -2515,12 +2526,13 @@ def watch(
     announced_conflicts: frozenset[str] = frozenset()
     try:
         if playground:
-            conflicts = playground_name_conflicts(list(WATCHED_FILES))
+            conflict_candidates = _readable_paths(list(WATCHED_FILES))
+            conflicts = playground_name_conflicts(conflict_candidates)
             if conflicts:
                 # The Playground stores files flat by name, so conflicting
                 # files can not both be synced; warn once and skip them
                 # (package installs still include them).
-                announced_conflicts = frozenset(playground_conflict_paths(list(WATCHED_FILES)))
+                announced_conflicts = frozenset(playground_conflict_paths(conflict_candidates))
                 click.secho(format_playground_conflict_skip(conflicts), fg="yellow")
         if "startup" in selected_server and selected_server["startup"] == "install":
             if dry_run:
@@ -2598,13 +2610,16 @@ def watch(
                 # A rename or new file can create a name conflict mid-session.
                 # The conflicting files can not both exist in the flat
                 # Playground layout, so skip them and sync everything else;
-                # warn only when the set of conflicts changes.
-                conflicted_paths = playground_conflict_paths(list(WATCHED_FILES))
+                # warn only when the set of conflicts changes. Files that can
+                # not be read are not conflict participants (they can never
+                # be uploaded), so their readable same-named siblings sync.
+                conflict_candidates = _readable_paths(list(WATCHED_FILES))
+                conflicted_paths = playground_conflict_paths(conflict_candidates)
                 if frozenset(conflicted_paths) != announced_conflicts:
                     announced_conflicts = frozenset(conflicted_paths)
                     if announced_conflicts:
                         click.secho(
-                            format_playground_conflict_skip(playground_name_conflicts(list(WATCHED_FILES))),
+                            format_playground_conflict_skip(playground_name_conflicts(conflict_candidates)),
                             fg="yellow",
                         )
                 # A file whose Playground name has an unconfirmed delete pending
