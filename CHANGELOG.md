@@ -17,6 +17,9 @@ This changelog was reconstructed from the repository's git tags and commit histo
 ### Fixed
 
 - `da watch` now honors `.gitignore` files in subdirectories of the package, matching the package archive builder (which excludes git-ignored files). Previously a file ignored by a nested `.gitignore` was watched but could never be archived, so it stayed dirty and triggered repeated full installs until the retry/skip suspension kicked in.
+- A file that can not be read no longer blocks its readable same-named sibling from syncing to the Playground: unreadable files do not count as name conflicts in `da install` or `da watch`.
+- Deleting a Playground file now counts as success when the server answers 404 — some servers or proxies report a missing file that way, and the file is already gone, so a retry could never clear the failure.
+- `da watch` defers uploading a file whose Playground name has a delete still being retried, so the retried delete can not remove a copy that was just uploaded.
 
 ## [26.8.0] - 2026-08-06
 
