@@ -2313,16 +2313,21 @@ def nested_gitignore_patterns(directory: str) -> list[str]:
     dirty forever and keeps triggering full installs until the archive-skip
     suspension kicks in.
 
-    Directories the root or an ancestor .gitignore excludes are not descended
-    into, mirroring git, which never reads the .gitignore files inside an
-    excluded directory: a negation there must not un-ignore anything, because
-    the archive can never include files from an excluded directory.
+    Directories the root ignore list (the root .gitignore, or the built-in
+    defaults when there is none) or an ancestor .gitignore excludes are not
+    descended into, mirroring git, which never reads the .gitignore files
+    inside an excluded directory: a negation there must not un-ignore
+    anything, because the archive can never include files from an excluded
+    directory.
     """
     root_gitignore = os.path.abspath(os.path.join(directory, ".gitignore"))
     if os.path.exists(root_gitignore):
         root_patterns = read_ignore_file(root_gitignore)
     else:
-        root_patterns = []
+        # No root .gitignore: use the same default ignore list as
+        # load_ignore_patterns, so directories git ignores by default are not
+        # descended into either.
+        root_patterns = GITIGNORE.split("\n")
     patterns: list[str] = []
     matcher = gitmatch.compile(root_patterns)
     for current_directory, subdirectories, files in os.walk(directory):

@@ -1237,6 +1237,33 @@ def test_nested_gitignore_inside_ignored_directory_is_not_read(tmp_path):
     assert str(sub_dir / "drop.txt") not in mod.WATCHED_FILES
 
 
+def test_nested_gitignore_default_ignores_without_root_gitignore(tmp_path):
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    # No root .gitignore: the built-in default ignore list applies, exactly as
+    # in load_ignore_patterns. `.idea` is in that default list, so the descent
+    # matcher must not read the .gitignore inside it: a negation there must
+    # not un-ignore anything, because the archive can never include files
+    # from a directory git ignores by default.
+    idea_dir = package_dir / ".idea"
+    idea_dir.mkdir()
+    (idea_dir / ".gitignore").write_text("!keep.txt\n", encoding="utf-8")
+    (idea_dir / "keep.txt").write_text("x", encoding="utf-8")
+    (idea_dir / "drop.txt").write_text("x", encoding="utf-8")
+
+    assert mod.nested_gitignore_patterns(str(package_dir)) == []
+
+    mod.GITMATCH_COMPILED = None
+    assert bool(mod.matches_ignore_patterns(str(idea_dir / "keep.txt"), str(package_dir))) is True
+    assert bool(mod.matches_ignore_patterns(str(idea_dir / "drop.txt"), str(package_dir))) is True
+
+    # and scan_directory must not track them either
+    mod.GITMATCH_COMPILED = None
+    mod.scan_directory(str(package_dir))
+    assert str(idea_dir / "keep.txt") not in mod.WATCHED_FILES
+    assert str(idea_dir / "drop.txt") not in mod.WATCHED_FILES
+
+
 def test_watch_command(tmp_path, monkeypatch):
     package_dir = tmp_path / "pkg"
     package_dir.mkdir()
